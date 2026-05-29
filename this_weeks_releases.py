@@ -163,7 +163,8 @@ def discover_movies(start: str, end: str) -> list[dict]:
                         "title": m.get("title", "?"),
                         "date": m.get("release_date", ""),
                         "poster": m.get("poster_path") or "",
-                        "overview": m.get("overview") or ""})
+                        "overview": m.get("overview") or "",
+                        "genre_ids": m.get("genre_ids", [])})
         page += 1
     return out
 
@@ -192,7 +193,8 @@ def discover_tv(start: str, end: str) -> list[dict]:
                         "title": s.get("name", "?"),
                         "date": s.get("first_air_date", ""),
                         "poster": s.get("poster_path") or "",
-                        "overview": s.get("overview") or ""})
+                        "overview": s.get("overview") or "",
+                        "genre_ids": s.get("genre_ids", [])})
         page += 1
     return out
 
@@ -213,6 +215,16 @@ def season_premiere(tmdb_id: int, start: str, end: str) -> tuple[int, str] | Non
         return None
     hits.sort(key=lambda x: x[1])
     return hits[0]
+
+
+def genre_maps() -> tuple[dict, dict]:
+    """One-time {id: name} maps for movie and TV genres (lists differ slightly)."""
+    try:
+        movie = {x["id"]: x["name"] for x in tmdb_get("/genre/movie/list").get("genres", [])}
+        tv = {x["id"]: x["name"] for x in tmdb_get("/genre/tv/list").get("genres", [])}
+        return movie, tv
+    except Exception:
+        return {}, {}
 
 
 def imdb_id_for(kind: str, tmdb_id: int) -> str | None:
@@ -294,9 +306,22 @@ def generate_html(shown: list[dict], start: str, end: str) -> str:
             bits.append("New Series" if it["season"] == 1 else f"Season {it['season']}")
         suffix = f' <span class="dim">{_esc(" · ".join(bits))}</span>' if bits else ""
 
+        url = f"https://www.imdb.com/title/{it['imdb_id']}/" if it.get("imdb_id") else ""
         poster = f"https://image.tmdb.org/t/p/w185{it['poster']}" if it.get("poster") else ""
-        poster_el = (f'<div class="poster" style="background-image:url(\'{poster}\')"></div>'
-                     if poster else '<div class="poster noimg">🎞️</div>')
+        pstyle = f' style="background-image:url(\'{poster}\')"' if poster else ""
+        pclass = "poster" if poster else "poster noimg"
+        pinner = "" if poster else "🎞️"
+        # Date chip (with weekday) overlaid on the poster's empty corner.
+        try:
+            d = dt.date.fromisoformat(it["added"][:10])
+            date_label = f"{d:%a} {d.month}/{d.day}"
+        except Exception:
+            date_label = it["added"][5:]
+        chip = f'<span class="pdate">{date_label}</span>'
+        if url:
+            poster_el = f'<a class="{pclass}" href="{url}" target="_blank" rel="noopener"{pstyle}>{pinner}{chip}</a>'
+        else:
+            poster_el = f'<div class="{pclass}"{pstyle}>{pinner}{chip}</div>'
 
         # Neutral pill; the small logo carries the brand color, not the whole pill.
         pills = ""
@@ -305,8 +330,14 @@ def generate_html(shown: list[dict], start: str, end: str) -> str:
                     if p.get("logo") else "")
             pills += f'<span class="pill">{logo}{_esc(p["name"])}</span>'
 
-        imdb = (f'<a class="imdb" href="https://www.imdb.com/title/{it["imdb_id"]}/" '
-                f'target="_blank" rel="noopener">IMDb ↗</a>' if it.get("imdb_id") else "")
+        # Up to 3 genre tags.
+        tags = "".join(f'<span class="tag">{_esc(gname)}</span>'
+                       for gname in it.get("genres", [])[:3])
+        tags = f'<div class="tags">{tags}</div>' if tags else ""
+
+        title_inner = f'{icon} {_esc(it["title"])}{suffix}'
+        title_el = (f'<a class="title" href="{url}" target="_blank" rel="noopener">{title_inner}</a>'
+                    if url else f'<span class="title">{title_inner}</span>')
         overview = _esc((it.get("overview") or "")[:170])
         cards.append(f"""
       <div class="card">
@@ -314,11 +345,11 @@ def generate_html(shown: list[dict], start: str, end: str) -> str:
         <div class="info">
           <div class="row1">
             <span class="rating" style="color:{fg};background:{bg}">{rating}</span>
-            <span class="title">{icon} {_esc(it['title'])}{suffix}</span>
+            {title_el}
           </div>
           <div class="pills">{pills}</div>
+          {tags}
           <div class="overview">{overview}</div>
-          <div class="actions">{imdb}<span class="votes">{fmt_votes(it['votes'])} votes · added {it['added'][5:]}</span></div>
         </div>
       </div>""")
 
@@ -326,30 +357,33 @@ def generate_html(shown: list[dict], start: str, end: str) -> str:
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>This Week's Releases</title>
 <style>
   * {{ box-sizing: border-box; }}
-  body {{ margin:0; background:#0b0d12; color:#e7e9ee; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }}
-  header {{ display:flex; align-items:baseline; gap:9px; padding:10px 16px; position:sticky; top:0; z-index:2; background:#0b0d12e8; backdrop-filter:blur(8px); border-bottom:1px solid #1a1e29; }}
+  html {{ -webkit-text-size-adjust:100%; }}
+  body {{ margin:0; background:#0b0d12; color:#e7e9ee; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; }}
+  a {{ -webkit-tap-highlight-color:rgba(255,255,255,.06); }}
+  header {{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; padding:11px 14px; position:sticky; top:0; z-index:2; background:#0b0d12e8; backdrop-filter:blur(8px); border-bottom:1px solid #1a1e29; padding-top:max(11px, env(safe-area-inset-top)); }}
   h1 {{ margin:0; font-size:17px; font-weight:700; }}
   .meta {{ color:#828a98; font-size:13px; }}
-  main {{ padding:8px 14px 40px; max-width:680px; margin:0 auto; }}
-  .card {{ display:flex; align-items:stretch; background:#161a22; border:1px solid #232838; border-radius:14px; overflow:hidden; margin:12px 0; }}
-  .poster {{ width:96px; flex:0 0 auto; background:#232838 center/cover no-repeat; }}
-  .poster.noimg {{ display:flex; align-items:center; justify-content:center; font-size:30px; color:#5c636f; }}
-  .info {{ min-width:0; flex:1; padding:13px 15px; }}
-  .row1 {{ display:flex; align-items:center; gap:9px; }}
-  .rating {{ font-weight:700; font-size:14px; padding:2px 9px; border-radius:8px; white-space:nowrap; flex:0 0 auto; font-variant-numeric:tabular-nums; }}
-  .title {{ font-weight:650; font-size:16px; line-height:1.25; }}
-  .dim {{ color:#8b92a0; font-weight:400; font-size:14px; }}
-  .pills {{ margin:8px 0; display:flex; gap:6px; flex-wrap:wrap; }}
-  .pill {{ display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:500; color:#aab2bf; background:#1a1f2b; border:1px solid #262c3a; padding:3px 10px 3px 4px; border-radius:999px; }}
-  .plogo {{ width:18px; height:18px; border-radius:5px; background:#fff; object-fit:contain; padding:1px; }}
-  .overview {{ color:#9aa1ad; font-size:13px; line-height:1.4; margin:4px 0 10px; }}
-  .actions {{ display:flex; align-items:center; justify-content:space-between; gap:10px; }}
-  .imdb {{ color:#d9b53d; border:1px solid #4a431f; background:transparent; font-weight:600; font-size:12px; text-decoration:none; padding:5px 11px; border-radius:8px; }}
-  .votes {{ color:#79808d; font-size:12px; text-align:right; }}
+  main {{ padding:6px 11px 40px; max-width:680px; margin:0 auto; }}
+  .card {{ display:flex; align-items:stretch; background:#161a22; border:1px solid #232838; border-radius:14px; overflow:hidden; margin:10px 0; }}
+  .poster {{ width:34vw; max-width:118px; min-width:96px; flex:0 0 auto; background:#232838 center/cover no-repeat; display:block; position:relative; }}
+  .poster.noimg {{ display:flex; align-items:center; justify-content:center; font-size:30px; color:#5c636f; text-decoration:none; }}
+  .pdate {{ position:absolute; left:6px; bottom:6px; background:rgba(0,0,0,.62); color:#eef1f6; font-size:11px; font-weight:600; padding:2px 7px; border-radius:6px; backdrop-filter:blur(2px); }}
+  .info {{ min-width:0; flex:1; padding:11px 13px; display:flex; flex-direction:column; }}
+  .row1 {{ display:flex; align-items:flex-start; gap:8px; }}
+  .rating {{ font-weight:700; font-size:14px; padding:2px 8px; border-radius:7px; white-space:nowrap; flex:0 0 auto; font-variant-numeric:tabular-nums; margin-top:1px; }}
+  .title {{ flex:1; min-width:0; font-weight:650; font-size:15.5px; line-height:1.3; overflow-wrap:anywhere; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }}
+  a.title {{ color:inherit; text-decoration:none; }}
+  .dim {{ color:#8b92a0; font-weight:400; font-size:13.5px; }}
+  .pills {{ margin:7px 0 0; display:flex; gap:6px; flex-wrap:wrap; }}
+  .pill {{ display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:500; color:#aab2bf; background:#1a1f2b; border:1px solid #262c3a; padding:3px 9px 3px 4px; border-radius:999px; }}
+  .plogo {{ width:17px; height:17px; border-radius:5px; background:#fff; object-fit:contain; padding:1px; }}
+  .tags {{ margin:7px 0 0; display:flex; gap:6px; flex-wrap:wrap; }}
+  .tag {{ font-size:11px; color:#9aa1ad; border:1px solid #2c3342; border-radius:6px; padding:2px 7px; }}
+  .overview {{ color:#9aa1ad; font-size:13px; line-height:1.42; margin:7px 0 0; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }}
   footer {{ text-align:center; color:#5c636f; font-size:12px; padding:20px; }}
 </style></head><body>
 <header>
@@ -413,6 +447,7 @@ def resolve_candidates(start: str, end: str, args) -> list[dict]:
 
     print(f"\n{len(candidates)} brand-new release(s) — matching IMDb ratings...")
     imdb_ratings = load_imdb_ratings()
+    gm_movie, gm_tv = genre_maps()
     print()
     for it in candidates:
         iid = imdb_id_for(it["kind"], it["tmdb_id"])
@@ -420,6 +455,8 @@ def resolve_candidates(start: str, end: str, args) -> list[dict]:
         it["rating"], it["votes"] = imdb_ratings.get(iid, (None, 0)) if iid else (None, 0)
         it["platforms"] = platforms(it["kind"], it["tmdb_id"])
         it["platform"] = "/".join(p["name"] for p in it["platforms"])  # string for terminal/push
+        gmap = gm_movie if it["kind"] == "Movie" else gm_tv
+        it["genres"] = [gmap[g] for g in it.get("genre_ids", []) if g in gmap]
         time.sleep(0.02)  # be gentle on TMDB
     return candidates
 
