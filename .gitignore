@@ -4,3 +4,5 @@ index.html
 _site/
 .cache/
 .DS_Store
+*.shortcut
+*(unsigned).plist

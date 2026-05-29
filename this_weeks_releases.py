@@ -439,6 +439,8 @@ def main() -> int:
     ap.add_argument("--cache", action="store_true",
                     help="Dev aid: reuse on-disk release data instead of re-fetching "
                          "(for iterating on HTML/format). The pipeline runs without it.")
+    ap.add_argument("--notify", choices=["auto", "always", "never"], default="auto",
+                    help="Pushcut policy: auto = only on Fridays; always = every run; never = off")
     args = ap.parse_args()
 
     if not TMDB_KEY:
@@ -514,8 +516,16 @@ def main() -> int:
             fh.write(html)
         print(f"Wrote {args.html_out} ({len(shown)} releases).")
 
-    # Push to the phone via Pushcut, if configured.
-    if PUSHCUT_WEBHOOK:
+    # Decide whether to notify: auto = Fridays only, always = every run, never = off.
+    is_friday = dt.date.today().weekday() == 4
+    should_notify = args.notify == "always" or (args.notify == "auto" and is_friday)
+
+    # Push to the phone via Pushcut, if configured and the policy allows.
+    if PUSHCUT_WEBHOOK and not should_notify:
+        reason = ("notifications disabled" if args.notify == "never"
+                  else f"auto policy notifies Fridays only; today is {dt.date.today():%A}")
+        print(f"Skipping Pushcut ({reason}).")
+    if PUSHCUT_WEBHOOK and should_notify:
         nice_dates = f"{start[5:].replace('-', '/')}–{end[5:].replace('-', '/')}"
         title = f"🍿 {len(shown)} New This Week"
         if PAGE_URL:

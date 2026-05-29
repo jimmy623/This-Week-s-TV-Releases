@@ -1,9 +1,9 @@
 name: This Week's Releases
 
-# Auto every Friday + manual ("Run workflow" in the Actions tab / GitHub mobile app).
+# Refreshes the page DAILY; notifies only on Fridays (manual runs always notify).
 on:
   schedule:
-    - cron: "0 15 * * 5"   # Fridays 15:00 UTC (08:00 PT / 11:00 ET) — adjust as you like
+    - cron: "0 15 * * *"   # daily 15:00 UTC = 11:00 EDT (10:00 EST in winter)
   workflow_dispatch: {}
 
 # Needed for GitHub Pages deploys.
@@ -45,10 +45,11 @@ jobs:
         uses: actions/deploy-pages@v5
 
       # Page is now live — send the Pushcut notification linking to it.
+      # Scheduled runs notify only on Fridays (--notify auto); manual runs always.
       # --cache reuses the data from the Generate step (no extra API calls).
       - name: Notify via Pushcut
         env:
           TMDB_API_KEY: unused-uses-cache
           PUSHCUT_WEBHOOK: ${{ secrets.PUSHCUT_WEBHOOK }}
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
-        run: python3 this_weeks_releases.py --cache --html-out ''
+        run: python3 this_weeks_releases.py --cache --html-out '' --notify ${{ github.event_name == 'workflow_dispatch' && 'always' || 'auto' }}
