@@ -1,0 +1,54 @@
+name: This Week's Releases
+
+# Auto every Friday + manual ("Run workflow" in the Actions tab / GitHub mobile app).
+on:
+  schedule:
+    - cron: "0 15 * * 5"   # Fridays 15:00 UTC (08:00 PT / 11:00 ET) — adjust as you like
+  workflow_dispatch: {}
+
+# Needed for GitHub Pages deploys.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Fetches fresh from TMDB/IMDb and writes the HTML page. --cache here just
+      # stores the resolved data on this runner so the Notify step can reuse it
+      # (no second fetch); the runner is ephemeral, so every run still fetches fresh.
+      - name: Generate page
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: python3 this_weeks_releases.py --cache --html-out _site/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      # Page is now live — send the Pushcut notification linking to it.
+      # --cache reuses the data from the Generate step (no extra API calls).
+      - name: Notify via Pushcut
+        env:
+          TMDB_API_KEY: unused-uses-cache
+          PUSHCUT_WEBHOOK: ${{ secrets.PUSHCUT_WEBHOOK }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: python3 this_weeks_releases.py --cache --html-out ''
