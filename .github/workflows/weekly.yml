@@ -1,7 +1,10 @@
 name: This Week's Releases
 
-# Refreshes the page DAILY; notifies only on Fridays (manual runs always notify).
+# Rebuilds on every push to main and DAILY; notifies only on Fridays
+# (manual workflow_dispatch runs always notify).
 on:
+  push:
+    branches: [main]       # rebuild the page whenever code lands on main
   schedule:
     - cron: "0 15 * * *"   # daily 15:00 UTC = 11:00 EDT (10:00 EST in winter)
   workflow_dispatch: {}
