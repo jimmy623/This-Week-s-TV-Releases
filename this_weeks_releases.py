@@ -368,8 +368,12 @@ def _esc(s: str) -> str:
             .replace('"', "&quot;"))
 
 
-def generate_html(shown: list[dict], start: str, end: str) -> str:
-    """Build a self-contained, mobile-first HTML page for the week's releases."""
+def generate_html(shown: list[dict], start: str, end: str, generated: str) -> str:
+    """Build a self-contained, mobile-first HTML page for the week's releases.
+
+    `generated` is a human-readable refresh timestamp shown in the footer, so you
+    can tell at a glance whether a (manual or scheduled) rebuild actually landed.
+    """
     def rating_style(r):
         # (text color, faint tint background) — restrained, not a solid block.
         if r is None:
@@ -504,7 +508,7 @@ def generate_html(shown: list[dict], start: str, end: str) -> str:
 </header>
 <main>{''.join(cards)}
 </main>
-<footer>Sources: TMDB (releases) · IMDb daily dataset (ratings)</footer>
+<footer>Refreshed {generated}<br>Sources: TMDB (releases) · IMDb daily dataset (ratings)</footer>
 <script>
 (function() {{
   var b = document.body,
@@ -692,7 +696,8 @@ def main() -> int:
     # Write the HTML page (nice mobile layout — the real viewing surface).
     # Pass the full set; the page tags each card and the toggle filters client-side.
     if args.html_out:
-        html = generate_html(shown_all, start, end)
+        generated = dt.datetime.now(dt.timezone.utc).strftime("%a, %b %-d %Y · %H:%M UTC")
+        html = generate_html(shown_all, start, end, generated)
         d = os.path.dirname(args.html_out)
         if d:
             os.makedirs(d, exist_ok=True)
