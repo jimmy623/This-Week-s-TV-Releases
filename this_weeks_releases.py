@@ -63,6 +63,16 @@ PROVIDER_DISPLAY = {
     15: "Hulu", 386: "Peacock", 1899: "Max", 384: "Max",
 }
 
+# TMDB NETWORK ids for our services -> display name. Networks are editorial
+# metadata, populated when a show is announced — unlike watch-providers (sourced
+# from JustWatch) which lag for brand-new titles. We use this as a fallback so a
+# launch-week premiere on one of our services isn't missed just because its
+# provider data hasn't landed yet (e.g. Cape Fear on Apple TV+).
+NETWORK_DISPLAY = {
+    213: "Netflix", 2552: "Apple TV+", 1024: "Prime", 4330: "Paramount+",
+    3353: "Peacock", 453: "Hulu", 3186: "Max", 49: "Max",
+}
+
 TMDB_KEY = os.environ.get("TMDB_API_KEY")
 PUSHCUT_WEBHOOK = os.environ.get("PUSHCUT_WEBHOOK")  # optional: push results to iPhone
 PAGE_URL = os.environ.get("PAGE_URL")  # optional: hosted HTML page the notification links to
@@ -142,20 +152,29 @@ def tmdb_get(path: str, **params) -> dict:
     return get_json(f"{TMDB}{path}", params)
 
 
-def discover_movies(start: str, end: str) -> list[dict]:
-    """Movies whose DIGITAL/streaming release falls in the window, on our providers."""
+def _discover_movie_pages(start: str, end: str, restrict: bool) -> list[dict]:
+    """One /discover/movie query (paginated, up to 5 pages).
+
+    restrict=True  -> only films on OUR services (watch-provider filter). This is
+                      the accurate population for the 'My Services' view — it
+                      includes e.g. foreign films on Netflix US that a plain
+                      region=US release-type query misses.
+    restrict=False -> every film with a US digital/TV release this week, for the
+                      page's 'All' view.
+    """
+    flt = (dict(watch_region=REGION, with_watch_providers=PROVIDER_IDS,
+                with_watch_monetization_types="flatrate") if restrict
+           else dict(region=REGION))
     out, page, pages = [], 1, 1
     while page <= pages and page <= 5:
         data = tmdb_get(
             "/discover/movie",
             language="en-US",
-            watch_region=REGION,
-            with_watch_providers=PROVIDER_IDS,
-            with_watch_monetization_types="flatrate",
             with_release_type="4|6",  # 4=Digital, 6=TV
             **{"release_date.gte": start, "release_date.lte": end},
             sort_by="popularity.desc",
             page=page,
+            **flt,
         )
         pages = data.get("total_pages", 1)
         for m in data.get("results", []):
@@ -169,23 +188,37 @@ def discover_movies(start: str, end: str) -> list[dict]:
     return out
 
 
-def discover_tv(start: str, end: str) -> list[dict]:
-    """Candidate shows with any episode airing in the window, on our providers.
+def discover_movies(start: str, end: str) -> list[dict]:
+    """Movies with a DIGITAL/streaming release in the window.
 
-    This is a SUPERSET — season_premiere() then keeps only those where a brand-new
-    series or a new season actually premieres in the window.
+    Two passes (resolve_candidates() de-dupes): provider-filtered for an accurate
+    'My Services' list, plus unfiltered for the 'All' view.
     """
+    out = _discover_movie_pages(start, end, restrict=True)
+    out += _discover_movie_pages(start, end, restrict=False)
+    return out
+
+
+def _discover_tv_pages(date_params: dict, restrict: bool) -> list[dict]:
+    """Run one /discover/tv query (paginated, up to 5 pages).
+
+    restrict=True  -> only shows on OUR services (watch-provider filter).
+    restrict=False -> every show, for the 'All' view. This pass also catches
+                      brand-new premieres whose provider data hasn't landed yet
+                      (e.g. Cape Fear) — they get matched to our services later in
+                      watch_info() via the network fallback.
+    """
+    flt = (dict(watch_region=REGION, with_watch_providers=PROVIDER_IDS,
+                with_watch_monetization_types="flatrate") if restrict else {})
     out, page, pages = [], 1, 1
     while page <= pages and page <= 5:
         data = tmdb_get(
             "/discover/tv",
             language="en-US",
-            watch_region=REGION,
-            with_watch_providers=PROVIDER_IDS,
-            with_watch_monetization_types="flatrate",
-            **{"air_date.gte": start, "air_date.lte": end},
+            **date_params,
             sort_by="popularity.desc",
             page=page,
+            **flt,
         )
         pages = data.get("total_pages", 1)
         for s in data.get("results", []):
@@ -196,6 +229,32 @@ def discover_tv(start: str, end: str) -> list[dict]:
                         "overview": s.get("overview") or "",
                         "genre_ids": s.get("genre_ids", [])})
         page += 1
+    return out
+
+
+def discover_tv(start: str, end: str) -> list[dict]:
+    """Candidate shows for the window.
+
+    This is a SUPERSET — season_premiere() then keeps only those where a brand-new
+    series or a new season actually premieres in the window. We run several passes
+    and merge them (resolve_candidates() de-dupes by tmdb_id):
+
+      - air_date in window       : new SEASONS of existing shows (episodes airing
+                                   this week).
+      - first_air_date in window : BRAND-NEW series. TMDB's episode-level air_date
+                                   index misses some premieres (a S1 only reachable
+                                   via first_air_date), so air_date alone drops them.
+
+    Each is run provider-filtered (accurate 'My Services' population, incl. shows
+    that rank low globally) AND unfiltered (the 'All' view, and no-provider
+    premieres like Cape Fear).
+    """
+    a = {"air_date.gte": start, "air_date.lte": end}
+    f = {"first_air_date.gte": start, "first_air_date.lte": end}
+    out = _discover_tv_pages(a, restrict=True)
+    out += _discover_tv_pages(f, restrict=True)
+    out += _discover_tv_pages(a, restrict=False)
+    out += _discover_tv_pages(f, restrict=False)
     return out
 
 
@@ -235,22 +294,53 @@ def imdb_id_for(kind: str, tmdb_id: int) -> str | None:
         return None
 
 
-def platforms(kind: str, tmdb_id: int) -> list[dict]:
-    """Which of OUR services stream (flatrate) this title in the US.
+def tv_networks_mine(tmdb_id: int) -> list[dict]:
+    """Fallback for brand-new shows: map the show's TMDB networks to OUR services.
 
-    Returns [{name, logo}] — logo is a TMDB logo_path (may be "").
+    TMDB has the NETWORK (editorial, set when announced) even when JustWatch-sourced
+    watch-providers are still empty — so this catches launch-week premieres whose
+    provider data hasn't landed yet. Returns [{name, logo}].
+    """
+    try:
+        nets = tmdb_get(f"/tv/{tmdb_id}").get("networks", [])
+    except Exception:
+        return []
+    out = []
+    for n in nets:
+        name = NETWORK_DISPLAY.get(n.get("id"))
+        if name and name not in [o["name"] for o in out]:
+            out.append({"name": name, "logo": n.get("logo_path") or ""})
+    return out
+
+
+def watch_info(kind: str, tmdb_id: int) -> tuple[list[dict], list[str]]:
+    """US flatrate streaming for a title, as (mine, all_names).
+
+    mine      -> [{name, logo}] limited to OUR services, with a network fallback
+                 for brand-new shows whose provider data hasn't landed yet.
+    all_names -> every US flatrate provider name (for the unfiltered 'All' view).
     """
     path = f"/movie/{tmdb_id}/watch/providers" if kind == "Movie" else f"/tv/{tmdb_id}/watch/providers"
     try:
         us = tmdb_get(path).get("results", {}).get(REGION, {})
     except Exception:
-        return []
-    out = []
+        us = {}
+    mine: list[dict] = []
+    all_names: list[str] = []
     for p in us.get("flatrate", []):
+        pname = p.get("provider_name") or ""
+        if pname and pname not in all_names:
+            all_names.append(pname)
         name = PROVIDER_DISPLAY.get(p.get("provider_id"))
-        if name and name not in [o["name"] for o in out]:
-            out.append({"name": name, "logo": p.get("logo_path") or ""})
-    return out
+        if name and name not in [o["name"] for o in mine]:
+            mine.append({"name": name, "logo": p.get("logo_path") or ""})
+    if not mine and kind == "TV":  # provider data not in yet — try the network
+        fb = tv_networks_mine(tmdb_id)
+        if fb:
+            mine = fb
+            if not all_names:
+                all_names = [o["name"] for o in fb]
+    return mine, all_names
 
 
 def streaming_date(tmdb_id: int, start: str, end: str) -> str | None:
@@ -324,11 +414,15 @@ def generate_html(shown: list[dict], start: str, end: str) -> str:
             poster_el = f'<div class="{pclass}"{pstyle}>{pinner}{chip}</div>'
 
         # Neutral pill; the small logo carries the brand color, not the whole pill.
-        pills = ""
+        # Two sets: 'mine' (our services, with logos) for the My Services view, and
+        # 'all' (every service, plain text) for the All view — toggled in the header.
+        pills_mine = ""
         for p in it.get("platforms", []):
             logo = (f'<img class="plogo" src="https://image.tmdb.org/t/p/w45{p["logo"]}" alt="">'
                     if p.get("logo") else "")
-            pills += f'<span class="pill">{logo}{_esc(p["name"])}</span>'
+            pills_mine += f'<span class="pill">{logo}{_esc(p["name"])}</span>'
+        pills_all = "".join(f'<span class="pill">{_esc(n)}</span>'
+                            for n in it.get("all_providers", []))
 
         # Up to 3 genre tags.
         tags = "".join(f'<span class="tag">{_esc(gname)}</span>'
@@ -339,20 +433,24 @@ def generate_html(shown: list[dict], start: str, end: str) -> str:
         title_el = (f'<a class="title" href="{url}" target="_blank" rel="noopener">{title_inner}</a>'
                     if url else f'<span class="title">{title_inner}</span>')
         overview = _esc((it.get("overview") or "")[:170])
+        mine_attr = "1" if it.get("on_my_services") else "0"
         cards.append(f"""
-      <div class="card">
+      <div class="card" data-mine="{mine_attr}">
         {poster_el}
         <div class="info">
           <div class="row1">
             <span class="rating" style="color:{fg};background:{bg}">{rating}</span>
             {title_el}
           </div>
-          <div class="pills">{pills}</div>
+          <div class="pills pills-mine">{pills_mine}</div>
+          <div class="pills pills-all">{pills_all}</div>
           {tags}
           <div class="overview">{overview}</div>
         </div>
       </div>""")
 
+    mine_count = sum(1 for it in shown if it.get("on_my_services"))
+    all_count = len(shown)
     nice_dates = f"{start[5:].replace('-', '/')} – {end[5:].replace('-', '/')}"
     return f"""<!doctype html>
 <html lang="en"><head>
@@ -364,7 +462,7 @@ def generate_html(shown: list[dict], start: str, end: str) -> str:
   html {{ -webkit-text-size-adjust:100%; }}
   body {{ margin:0; background:#0b0d12; color:#e7e9ee; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; }}
   a {{ -webkit-tap-highlight-color:rgba(255,255,255,.06); }}
-  header {{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; padding:11px 14px; position:sticky; top:0; z-index:2; background:#0b0d12e8; backdrop-filter:blur(8px); border-bottom:1px solid #1a1e29; padding-top:max(11px, env(safe-area-inset-top)); }}
+  header {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:11px 14px; position:sticky; top:0; z-index:2; background:#0b0d12e8; backdrop-filter:blur(8px); border-bottom:1px solid #1a1e29; padding-top:max(11px, env(safe-area-inset-top)); }}
   h1 {{ margin:0; font-size:17px; font-weight:700; }}
   .meta {{ color:#828a98; font-size:13px; }}
   main {{ padding:6px 11px 40px; max-width:680px; margin:0 auto; }}
@@ -385,14 +483,46 @@ def generate_html(shown: list[dict], start: str, end: str) -> str:
   .tag {{ font-size:11px; color:#9aa1ad; border:1px solid #2c3342; border-radius:6px; padding:2px 7px; }}
   .overview {{ color:#9aa1ad; font-size:13px; line-height:1.42; margin:7px 0 0; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }}
   footer {{ text-align:center; color:#5c636f; font-size:12px; padding:20px; }}
-</style></head><body>
+  .htext {{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; min-width:0; }}
+  .toggle {{ margin-left:auto; display:inline-flex; background:#11151d; border:1px solid #232838; border-radius:999px; padding:2px; flex:0 0 auto; }}
+  .toggle button {{ appearance:none; -webkit-appearance:none; border:0; background:transparent; color:#9aa1ad; font:inherit; font-size:12.5px; font-weight:600; padding:5px 12px; border-radius:999px; cursor:pointer; }}
+  .toggle button.active {{ background:#2a3142; color:#e7e9ee; }}
+  body.view-mine .card[data-mine="0"] {{ display:none; }}
+  .pills-all {{ display:none; }}
+  body.view-all .pills-all {{ display:flex; }}
+  body.view-all .pills-mine {{ display:none; }}
+</style></head><body class="view-mine">
 <header>
-  <h1>🍿 New This Week</h1>
-  <span class="meta">{len(shown)} titles · {nice_dates}</span>
+  <div class="htext">
+    <h1>🍿 New This Week</h1>
+    <span class="meta"><span id="count">{mine_count}</span> titles · {nice_dates}</span>
+  </div>
+  <div class="toggle" role="tablist">
+    <button id="tab-mine" class="active" type="button">My Services</button>
+    <button id="tab-all" type="button">All</button>
+  </div>
 </header>
 <main>{''.join(cards)}
 </main>
 <footer>Sources: TMDB (releases) · IMDb daily dataset (ratings)</footer>
+<script>
+(function() {{
+  var b = document.body,
+      tm = document.getElementById('tab-mine'),
+      ta = document.getElementById('tab-all'),
+      c = document.getElementById('count');
+  var nMine = {mine_count}, nAll = {all_count};
+  function set(all) {{
+    b.classList.toggle('view-all', all);
+    b.classList.toggle('view-mine', !all);
+    tm.classList.toggle('active', !all);
+    ta.classList.toggle('active', all);
+    c.textContent = all ? nAll : nMine;
+  }}
+  tm.addEventListener('click', function() {{ set(false); }});
+  ta.addEventListener('click', function() {{ set(true); }});
+}})();
+</script>
 </body></html>"""
 
 
@@ -453,8 +583,11 @@ def resolve_candidates(start: str, end: str, args) -> list[dict]:
         iid = imdb_id_for(it["kind"], it["tmdb_id"])
         it["imdb_id"] = iid
         it["rating"], it["votes"] = imdb_ratings.get(iid, (None, 0)) if iid else (None, 0)
-        it["platforms"] = platforms(it["kind"], it["tmdb_id"])
-        it["platform"] = "/".join(p["name"] for p in it["platforms"])  # string for terminal/push
+        mine, all_names = watch_info(it["kind"], it["tmdb_id"])
+        it["platforms"] = mine                                       # our services (My Services view)
+        it["all_providers"] = all_names or [p["name"] for p in mine]  # any service (All view)
+        it["on_my_services"] = bool(mine)
+        it["platform"] = "/".join(p["name"] for p in mine)           # string for terminal/push
         gmap = gm_movie if it["kind"] == "Movie" else gm_tv
         it["genres"] = [gmap[g] for g in it.get("genre_ids", []) if g in gmap]
         time.sleep(0.02)  # be gentle on TMDB
@@ -514,14 +647,24 @@ def main() -> int:
         print("\nNo brand-new movies or new series/seasons on your services this week.")
         return 0
 
-    # Apply vote floor (drops unrated/too-new titles, which have 0 votes).
-    shown = [it for it in candidates if it["votes"] >= args.min_votes]
-    shown.sort(key=lambda x: (x["rating"] or 0, x["votes"]), reverse=True)
-    dropped = len(candidates) - len(shown)
+    # Apply vote floor (drops unrated/too-new titles, which have 0 votes), BUT
+    # never hide a brand-new premiere on YOUR services just because it has no IMDb
+    # votes yet (e.g. Cape Fear, days old) — those are exactly what this surfaces.
+    # The 0-vote exemption is scoped to on_my_services so the 'All' view (full of
+    # global 0-vote premieres) stays clean.
+    def passes_floor(it: dict) -> bool:
+        return it["votes"] >= args.min_votes or (it["on_my_services"] and it["votes"] == 0)
+
+    # shown_all = everything this week (page's 'All' view);
+    # shown = the subset on your subscriptions (default 'My Services' view).
+    shown_all = [it for it in candidates if passes_floor(it)]
+    shown_all.sort(key=lambda x: (x["rating"] or 0, x["votes"]), reverse=True)
+    shown = [it for it in shown_all if it["on_my_services"]]
+    dropped = len(candidates) - len(shown_all)
     if dropped:
         print(f"(Hid {dropped} title(s) with fewer than {args.min_votes} IMDb votes.)\n")
 
-    if not shown:
+    if not shown_all:
         print(f"No titles with at least {args.min_votes} IMDb votes this week. "
               f"Re-run with --min-votes 0 to see everything.")
         return 0
@@ -542,10 +685,14 @@ def main() -> int:
         if it["imdb_id"]:
             print(f"{'':>7}https://www.imdb.com/title/{it['imdb_id']}/")
     print("\n('Added' = date it hit your streaming services this week.)")
+    extra = len(shown_all) - len(shown)
+    if extra:
+        print(f"+{extra} more new this week not on your services — see the 'All' tab on the page.")
 
     # Write the HTML page (nice mobile layout — the real viewing surface).
+    # Pass the full set; the page tags each card and the toggle filters client-side.
     if args.html_out:
-        html = generate_html(shown, start, end)
+        html = generate_html(shown_all, start, end)
         d = os.path.dirname(args.html_out)
         if d:
             os.makedirs(d, exist_ok=True)
