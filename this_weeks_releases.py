@@ -368,11 +368,14 @@ def _esc(s: str) -> str:
             .replace('"', "&quot;"))
 
 
-def generate_html(shown: list[dict], start: str, end: str, generated: str) -> str:
+def generate_html(shown: list[dict], start: str, end: str,
+                  generated: str, generated_iso: str) -> str:
     """Build a self-contained, mobile-first HTML page for the week's releases.
 
-    `generated` is a human-readable refresh timestamp shown in the footer, so you
-    can tell at a glance whether a (manual or scheduled) rebuild actually landed.
+    The footer shows when the data was refreshed, so you can tell at a glance
+    whether a (manual or scheduled) rebuild actually landed. `generated` is the
+    UTC fallback text; `generated_iso` is the UTC instant (ISO 8601) the browser
+    reformats into the viewer's own timezone via JS.
     """
     def rating_style(r):
         # (text color, faint tint background) — restrained, not a solid block.
@@ -508,7 +511,7 @@ def generate_html(shown: list[dict], start: str, end: str, generated: str) -> st
 </header>
 <main>{''.join(cards)}
 </main>
-<footer>Refreshed {generated}<br>Sources: TMDB (releases) · IMDb daily dataset (ratings)</footer>
+<footer>Refreshed <span id="refreshed" data-ts="{generated_iso}">{generated}</span><br>Sources: TMDB (releases) · IMDb daily dataset (ratings)</footer>
 <script>
 (function() {{
   var b = document.body,
@@ -525,6 +528,21 @@ def generate_html(shown: list[dict], start: str, end: str, generated: str) -> st
   }}
   tm.addEventListener('click', function() {{ set(false); }});
   ta.addEventListener('click', function() {{ set(true); }});
+
+  // Reformat the refresh time into the viewer's local timezone (falls back to
+  // the embedded UTC text if JS is off or the date can't be parsed).
+  var r = document.getElementById('refreshed');
+  if (r) {{
+    var d = new Date(r.getAttribute('data-ts'));
+    if (!isNaN(d.getTime())) {{
+      try {{
+        r.textContent = d.toLocaleString(undefined, {{
+          weekday: 'short', year: 'numeric', month: 'short', day: 'numeric',
+          hour: '2-digit', minute: '2-digit', timeZoneName: 'short'
+        }});
+      }} catch (e) {{}}
+    }}
+  }}
 }})();
 </script>
 </body></html>"""
@@ -696,8 +714,10 @@ def main() -> int:
     # Write the HTML page (nice mobile layout — the real viewing surface).
     # Pass the full set; the page tags each card and the toggle filters client-side.
     if args.html_out:
-        generated = dt.datetime.now(dt.timezone.utc).strftime("%a, %b %-d %Y · %H:%M UTC")
-        html = generate_html(shown_all, start, end, generated)
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        generated = now_utc.strftime("%a, %b %-d %Y · %H:%M UTC")  # no-JS fallback
+        generated_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")     # JS -> viewer's tz
+        html = generate_html(shown_all, start, end, generated, generated_iso)
         d = os.path.dirname(args.html_out)
         if d:
             os.makedirs(d, exist_ok=True)
