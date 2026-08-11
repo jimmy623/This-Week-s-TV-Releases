@@ -73,6 +73,19 @@ NETWORK_DISPLAY = {
     3353: "Peacock", 453: "Hulu", 3186: "Max", 49: "Max",
 }
 
+# ISO 639-1 codes for languages spoken (essentially) only in India. A title in one
+# of these is Indian regardless of what TMDB says about its origin country — which
+# matters for movies, where /discover often omits origin_country entirely.
+INDIAN_LANGS = {
+    "hi", "ta", "te", "ml", "kn", "mr", "pa", "gu", "or", "as",
+    "sa", "bh", "kok", "mai", "doi", "mni", "sat", "ks", "sd",
+}
+
+# Shared with neighbouring countries (Urdu -> Pakistan, Bengali -> Bangladesh), so
+# these only count as Indian when TMDB independently reports IN as an origin
+# country. Guessing here would wrongly hide Pakistani and Bangladeshi titles.
+INDIAN_SHARED_LANGS = {"ur", "bn"}
+
 TMDB_KEY = os.environ.get("TMDB_API_KEY")
 PUSHCUT_WEBHOOK = os.environ.get("PUSHCUT_WEBHOOK")  # optional: push results to iPhone
 PAGE_URL = os.environ.get("PAGE_URL")  # optional: hosted HTML page the notification links to
@@ -147,6 +160,23 @@ def week_window(today: dt.date) -> tuple[dt.date, dt.date]:
     return monday, monday + dt.timedelta(days=6)
 
 
+def is_indian(it: dict) -> bool:
+    """Whether a title is Indian, for the page's default-on 'Hide Indian titles' filter.
+
+    Two signals, because neither is reliable alone: TMDB gives origin_country for TV
+    but frequently omits it for movies, while original_language misses Indian
+    productions shot in English. We deliberately bias toward false NEGATIVES (an
+    occasional Indian title slips through) over false positives (silently hiding a
+    Pakistani or Bangladeshi title the user never asked to filter).
+    """
+    if "IN" in (it.get("origin_country") or []):
+        return True
+    lang = it.get("original_language") or ""
+    if lang in INDIAN_LANGS:
+        return True
+    return lang in INDIAN_SHARED_LANGS and "IN" in (it.get("origin_country") or [])
+
+
 def tmdb_get(path: str, **params) -> dict:
     params["api_key"] = TMDB_KEY
     return get_json(f"{TMDB}{path}", params)
@@ -183,7 +213,9 @@ def _discover_movie_pages(start: str, end: str, restrict: bool) -> list[dict]:
                         "date": m.get("release_date", ""),
                         "poster": m.get("poster_path") or "",
                         "overview": m.get("overview") or "",
-                        "genre_ids": m.get("genre_ids", [])})
+                        "genre_ids": m.get("genre_ids", []),
+                        "original_language": m.get("original_language") or "",
+                        "origin_country": m.get("origin_country") or []})
         page += 1
     return out
 
@@ -227,7 +259,9 @@ def _discover_tv_pages(date_params: dict, restrict: bool) -> list[dict]:
                         "date": s.get("first_air_date", ""),
                         "poster": s.get("poster_path") or "",
                         "overview": s.get("overview") or "",
-                        "genre_ids": s.get("genre_ids", [])})
+                        "genre_ids": s.get("genre_ids", []),
+                        "original_language": s.get("original_language") or "",
+                        "origin_country": s.get("origin_country") or []})
         page += 1
     return out
 
@@ -368,81 +402,78 @@ def _esc(s: str) -> str:
             .replace('"', "&quot;"))
 
 
-def generate_html(shown: list[dict], start: str, end: str,
-                  generated: str, generated_iso: str) -> str:
-    """Build a self-contained, mobile-first HTML page for the week's releases.
+def _rating_style(r: float | None) -> tuple[str, str]:
+    """(text color, faint tint background) — restrained, not a solid block."""
+    if r is None:
+        return "#8b92a0", "rgba(139,146,160,.12)"
+    if r >= 7.5:
+        return "#5fd08a", "rgba(95,208,138,.13)"
+    if r >= 6.0:
+        return "#e0b34a", "rgba(224,179,74,.13)"
+    return "#e08a7f", "rgba(224,138,127,.13)"
 
-    The footer shows when the data was refreshed, so you can tell at a glance
-    whether a (manual or scheduled) rebuild actually landed. `generated` is the
-    UTC fallback text; `generated_iso` is the UTC instant (ISO 8601) the browser
-    reformats into the viewer's own timezone via JS.
+
+def _card_html(it: dict, week_key: str) -> str:
+    """One release card.
+
+    Every card for both weeks is emitted into the same page; the data-* attributes
+    (week / mine / indian) are what the three client-side toggles filter on.
     """
-    def rating_style(r):
-        # (text color, faint tint background) — restrained, not a solid block.
-        if r is None:
-            return "#8b92a0", "rgba(139,146,160,.12)"
-        if r >= 7.5:
-            return "#5fd08a", "rgba(95,208,138,.13)"
-        if r >= 6.0:
-            return "#e0b34a", "rgba(224,179,74,.13)"
-        return "#e08a7f", "rgba(224,138,127,.13)"
+    r = it["rating"]
+    rating = f"{r:.1f}" if r is not None else "—"
+    fg, bg = _rating_style(r)
+    icon = "📺" if it["kind"] == "TV" else "🎬"
 
-    cards = []
-    for it in shown:
-        r = it["rating"]
-        rating = f"{r:.1f}" if r is not None else "—"
-        fg, bg = rating_style(r)
-        icon = "📺" if it["kind"] == "TV" else "🎬"
+    # Title line: title + (year) · season — all together, season de-emphasized.
+    bits = []
+    year = (it["date"] or "")[:4]
+    if year:
+        bits.append(f"({year})")
+    if it.get("season"):
+        bits.append("New Series" if it["season"] == 1 else f"Season {it['season']}")
+    suffix = f' <span class="dim">{_esc(" · ".join(bits))}</span>' if bits else ""
 
-        # Title line: title + (year) · season — all together, season de-emphasized.
-        bits = []
-        year = (it["date"] or "")[:4]
-        if year:
-            bits.append(f"({year})")
-        if it.get("season"):
-            bits.append("New Series" if it["season"] == 1 else f"Season {it['season']}")
-        suffix = f' <span class="dim">{_esc(" · ".join(bits))}</span>' if bits else ""
+    url = f"https://www.imdb.com/title/{it['imdb_id']}/" if it.get("imdb_id") else ""
+    poster = f"https://image.tmdb.org/t/p/w185{it['poster']}" if it.get("poster") else ""
+    pstyle = f' style="background-image:url(\'{poster}\')"' if poster else ""
+    pclass = "poster" if poster else "poster noimg"
+    pinner = "" if poster else "🎞️"
+    # Date chip (with weekday) overlaid on the poster's empty corner.
+    try:
+        d = dt.date.fromisoformat(it["added"][:10])
+        date_label = f"{d:%a} {d.month}/{d.day}"
+    except Exception:
+        date_label = it["added"][5:]
+    chip = f'<span class="pdate">{date_label}</span>'
+    if url:
+        poster_el = f'<a class="{pclass}" href="{url}" target="_blank" rel="noopener"{pstyle}>{pinner}{chip}</a>'
+    else:
+        poster_el = f'<div class="{pclass}"{pstyle}>{pinner}{chip}</div>'
 
-        url = f"https://www.imdb.com/title/{it['imdb_id']}/" if it.get("imdb_id") else ""
-        poster = f"https://image.tmdb.org/t/p/w185{it['poster']}" if it.get("poster") else ""
-        pstyle = f' style="background-image:url(\'{poster}\')"' if poster else ""
-        pclass = "poster" if poster else "poster noimg"
-        pinner = "" if poster else "🎞️"
-        # Date chip (with weekday) overlaid on the poster's empty corner.
-        try:
-            d = dt.date.fromisoformat(it["added"][:10])
-            date_label = f"{d:%a} {d.month}/{d.day}"
-        except Exception:
-            date_label = it["added"][5:]
-        chip = f'<span class="pdate">{date_label}</span>'
-        if url:
-            poster_el = f'<a class="{pclass}" href="{url}" target="_blank" rel="noopener"{pstyle}>{pinner}{chip}</a>'
-        else:
-            poster_el = f'<div class="{pclass}"{pstyle}>{pinner}{chip}</div>'
+    # Neutral pill; the small logo carries the brand color, not the whole pill.
+    # Two sets: 'mine' (our services, with logos) for the My Services view, and
+    # 'all' (every service, plain text) for the All view — toggled in the header.
+    pills_mine = ""
+    for p in it.get("platforms", []):
+        logo = (f'<img class="plogo" src="https://image.tmdb.org/t/p/w45{p["logo"]}" alt="">'
+                if p.get("logo") else "")
+        pills_mine += f'<span class="pill">{logo}{_esc(p["name"])}</span>'
+    pills_all = "".join(f'<span class="pill">{_esc(n)}</span>'
+                        for n in it.get("all_providers", []))
 
-        # Neutral pill; the small logo carries the brand color, not the whole pill.
-        # Two sets: 'mine' (our services, with logos) for the My Services view, and
-        # 'all' (every service, plain text) for the All view — toggled in the header.
-        pills_mine = ""
-        for p in it.get("platforms", []):
-            logo = (f'<img class="plogo" src="https://image.tmdb.org/t/p/w45{p["logo"]}" alt="">'
-                    if p.get("logo") else "")
-            pills_mine += f'<span class="pill">{logo}{_esc(p["name"])}</span>'
-        pills_all = "".join(f'<span class="pill">{_esc(n)}</span>'
-                            for n in it.get("all_providers", []))
+    # Up to 3 genre tags.
+    tags = "".join(f'<span class="tag">{_esc(gname)}</span>'
+                   for gname in it.get("genres", [])[:3])
+    tags = f'<div class="tags">{tags}</div>' if tags else ""
 
-        # Up to 3 genre tags.
-        tags = "".join(f'<span class="tag">{_esc(gname)}</span>'
-                       for gname in it.get("genres", [])[:3])
-        tags = f'<div class="tags">{tags}</div>' if tags else ""
-
-        title_inner = f'{icon} {_esc(it["title"])}{suffix}'
-        title_el = (f'<a class="title" href="{url}" target="_blank" rel="noopener">{title_inner}</a>'
-                    if url else f'<span class="title">{title_inner}</span>')
-        overview = _esc((it.get("overview") or "")[:170])
-        mine_attr = "1" if it.get("on_my_services") else "0"
-        cards.append(f"""
-      <div class="card" data-mine="{mine_attr}">
+    title_inner = f'{icon} {_esc(it["title"])}{suffix}'
+    title_el = (f'<a class="title" href="{url}" target="_blank" rel="noopener">{title_inner}</a>'
+                if url else f'<span class="title">{title_inner}</span>')
+    overview = _esc((it.get("overview") or "")[:170])
+    mine_attr = "1" if it.get("on_my_services") else "0"
+    indian_attr = "1" if it.get("is_indian") else "0"
+    return f"""
+      <div class="card" data-week="{week_key}" data-mine="{mine_attr}" data-indian="{indian_attr}">
         {poster_el}
         <div class="info">
           <div class="row1">
@@ -454,11 +485,30 @@ def generate_html(shown: list[dict], start: str, end: str,
           {tags}
           <div class="overview">{overview}</div>
         </div>
-      </div>""")
+      </div>"""
 
-    mine_count = sum(1 for it in shown if it.get("on_my_services"))
-    all_count = len(shown)
-    nice_dates = f"{start[5:].replace('-', '/')} – {end[5:].replace('-', '/')}"
+
+def nice_range(start: str, end: str) -> str:
+    """'2026-08-10','2026-08-16' -> '8/10 – 8/16'."""
+    return f"{start[5:].replace('-', '/')} – {end[5:].replace('-', '/')}"
+
+
+def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
+    """Build a self-contained, mobile-first HTML page for the releases.
+
+    `weeks` is [{key, label, start, end, items}] — currently this week and last
+    week. Both weeks' cards are emitted into the one page and the header toggle
+    swaps between them client-side, so switching weeks costs no network round-trip
+    and works from the cached page offline.
+
+    The footer shows when the data was refreshed, so you can tell at a glance
+    whether a (manual or scheduled) rebuild actually landed. `generated` is the
+    UTC fallback text; `generated_iso` is the UTC instant (ISO 8601) the browser
+    reformats into the viewer's own timezone via JS.
+    """
+    cards = [_card_html(it, w["key"]) for w in weeks for it in w["items"]]
+    dates_json = json.dumps({w["key"]: nice_range(w["start"], w["end"]) for w in weeks})
+    first_dates = nice_range(weeks[0]["start"], weeks[0]["end"])
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -472,7 +522,7 @@ def generate_html(shown: list[dict], start: str, end: str,
   header {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:11px 14px; position:sticky; top:0; z-index:2; background:#0b0d12e8; backdrop-filter:blur(8px); border-bottom:1px solid #1a1e29; padding-top:max(11px, env(safe-area-inset-top)); }}
   h1 {{ margin:0; font-size:17px; font-weight:700; }}
   .meta {{ color:#828a98; font-size:13px; }}
-  main {{ padding:6px 11px 40px; max-width:680px; margin:0 auto; }}
+  main {{ padding:6px 11px 16px; max-width:680px; margin:0 auto; }}
   .card {{ display:flex; align-items:stretch; background:#161a22; border:1px solid #232838; border-radius:14px; overflow:hidden; margin:10px 0; }}
   .poster {{ width:34vw; max-width:118px; min-width:96px; flex:0 0 auto; background:#232838 center/cover no-repeat; display:block; position:relative; }}
   .poster.noimg {{ display:flex; align-items:center; justify-content:center; font-size:30px; color:#5c636f; text-decoration:none; }}
@@ -489,45 +539,111 @@ def generate_html(shown: list[dict], start: str, end: str,
   .tags {{ margin:7px 0 0; display:flex; gap:6px; flex-wrap:wrap; }}
   .tag {{ font-size:11px; color:#9aa1ad; border:1px solid #2c3342; border-radius:6px; padding:2px 7px; }}
   .overview {{ color:#9aa1ad; font-size:13px; line-height:1.42; margin:7px 0 0; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }}
-  footer {{ text-align:center; color:#5c636f; font-size:12px; padding:20px; }}
+  footer {{ text-align:center; color:#5c636f; font-size:12px; padding:8px 20px 28px; }}
   .htext {{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; min-width:0; }}
-  .toggle {{ margin-left:auto; display:inline-flex; background:#11151d; border:1px solid #232838; border-radius:999px; padding:2px; flex:0 0 auto; }}
+  .toggles {{ margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }}
+  .toggle {{ display:inline-flex; background:#11151d; border:1px solid #232838; border-radius:999px; padding:2px; flex:0 0 auto; }}
   .toggle button {{ appearance:none; -webkit-appearance:none; border:0; background:transparent; color:#9aa1ad; font:inherit; font-size:12.5px; font-weight:600; padding:5px 12px; border-radius:999px; cursor:pointer; }}
   .toggle button.active {{ background:#2a3142; color:#e7e9ee; }}
+  .empty {{ display:none; text-align:center; color:#5c636f; font-size:14px; padding:36px 20px; }}
+  /* Page-level preferences live down here, out of the header's way. */
+  .prefs {{ max-width:680px; margin:0 auto; padding:0 11px; display:flex; justify-content:center; }}
+  .switch {{ display:inline-flex; align-items:center; gap:10px; color:#828a98; font-size:13px; cursor:pointer; user-select:none; -webkit-user-select:none; padding:9px 14px; background:#11151d; border:1px solid #232838; border-radius:999px; }}
+  .switch input {{ appearance:none; -webkit-appearance:none; margin:0; width:34px; height:20px; border-radius:999px; background:#2a3142; position:relative; flex:0 0 auto; transition:background .15s; cursor:pointer; }}
+  .switch input::after {{ content:""; position:absolute; top:2px; left:2px; width:16px; height:16px; border-radius:50%; background:#e7e9ee; transition:transform .15s; }}
+  .switch input:checked {{ background:#3d6be0; }}
+  .switch input:checked::after {{ transform:translateX(14px); }}
   body.view-mine .card[data-mine="0"] {{ display:none; }}
+  body.hide-indian .card[data-indian="1"] {{ display:none; }}
+  body.week-this .card[data-week="last"] {{ display:none; }}
+  body.week-last .card[data-week="this"] {{ display:none; }}
   .pills-all {{ display:none; }}
   body.view-all .pills-all {{ display:flex; }}
   body.view-all .pills-mine {{ display:none; }}
-</style></head><body class="view-mine">
+</style></head><body class="view-all week-this hide-indian">
 <header>
   <div class="htext">
-    <h1>🍿 New This Week</h1>
-    <span class="meta"><span id="count">{mine_count}</span> titles · {nice_dates}</span>
+    <h1>🍿 New Releases</h1>
+    <span class="meta"><span id="count">0</span> titles · <span id="dates">{first_dates}</span></span>
   </div>
-  <div class="toggle" role="tablist">
-    <button id="tab-mine" class="active" type="button">My Services</button>
-    <button id="tab-all" type="button">All</button>
+  <div class="toggles">
+    <div class="toggle" role="tablist">
+      <button id="tab-this" class="active" type="button">This Week</button>
+      <button id="tab-last" type="button">Last Week</button>
+    </div>
+    <div class="toggle" role="tablist">
+      <button id="tab-mine" type="button">My Services</button>
+      <button id="tab-all" class="active" type="button">All</button>
+    </div>
   </div>
 </header>
 <main>{''.join(cards)}
+  <p id="empty" class="empty">Nothing matches these filters.</p>
 </main>
+<div class="prefs">
+  <label class="switch">
+    <input type="checkbox" id="hide-indian" checked>
+    <span>Hide Indian titles</span>
+  </label>
+</div>
 <footer>Refreshed <span id="refreshed" data-ts="{generated_iso}">{generated}</span><br>Sources: TMDB (releases) · IMDb daily dataset (ratings)</footer>
 <script>
 (function() {{
-  var b = document.body,
-      tm = document.getElementById('tab-mine'),
-      ta = document.getElementById('tab-all'),
-      c = document.getElementById('count');
-  var nMine = {mine_count}, nAll = {all_count};
-  function set(all) {{
-    b.classList.toggle('view-all', all);
-    b.classList.toggle('view-mine', !all);
-    tm.classList.toggle('active', !all);
-    ta.classList.toggle('active', all);
-    c.textContent = all ? nAll : nMine;
+  var b = document.body, DATES = {dates_json};
+  function el(id) {{ return document.getElementById(id); }}
+
+  // Toggle state persists per-device, so the defaults below only apply on a first
+  // visit. Wrapped in try/catch: Safari private browsing can throw on localStorage.
+  function pref(k, d) {{
+    try {{ var v = localStorage.getItem(k); return v === null ? d : v === '1'; }}
+    catch (e) {{ return d; }}
   }}
-  tm.addEventListener('click', function() {{ set(false); }});
-  ta.addEventListener('click', function() {{ set(true); }});
+  function save(k, v) {{ try {{ localStorage.setItem(k, v ? '1' : '0'); }} catch (e) {{}} }}
+
+  var showAll  = pref('twr.all',  true),   // default: All services
+      lastWeek = pref('twr.last', false),  // default: this week
+      noIndian = pref('twr.noin', true);   // default: hide Indian titles
+
+  var cards = [].slice.call(document.querySelectorAll('.card')),
+      tabMine = el('tab-mine'), tabAll = el('tab-all'),
+      tabThis = el('tab-this'), tabLast = el('tab-last'),
+      chk = el('hide-indian'), countEl = el('count'),
+      datesEl = el('dates'), emptyEl = el('empty');
+
+  // Single source of truth: CSS does the hiding, this recomputes the visible
+  // count with the same three predicates so the header can never disagree.
+  function apply() {{
+    var wk = lastWeek ? 'last' : 'this';
+    b.classList.toggle('view-all', showAll);
+    b.classList.toggle('view-mine', !showAll);
+    b.classList.toggle('week-last', lastWeek);
+    b.classList.toggle('week-this', !lastWeek);
+    b.classList.toggle('hide-indian', noIndian);
+    tabAll.classList.toggle('active', showAll);
+    tabMine.classList.toggle('active', !showAll);
+    tabLast.classList.toggle('active', lastWeek);
+    tabThis.classList.toggle('active', !lastWeek);
+    chk.checked = noIndian;
+
+    var n = 0;
+    for (var i = 0; i < cards.length; i++) {{
+      var d = cards[i].dataset;
+      if (d.week !== wk) continue;
+      if (!showAll && d.mine === '0') continue;
+      if (noIndian && d.indian === '1') continue;
+      n++;
+    }}
+    countEl.textContent = n;
+    datesEl.textContent = DATES[wk] || '';
+    emptyEl.style.display = n ? 'none' : 'block';
+  }}
+
+  tabMine.addEventListener('click', function() {{ showAll = false; save('twr.all', false); apply(); }});
+  tabAll.addEventListener('click', function() {{ showAll = true; save('twr.all', true); apply(); }});
+  tabThis.addEventListener('click', function() {{ lastWeek = false; save('twr.last', false); apply(); }});
+  tabLast.addEventListener('click', function() {{ lastWeek = true; save('twr.last', true); apply(); }});
+  chk.addEventListener('change', function() {{ noIndian = chk.checked; save('twr.noin', noIndian); apply(); }});
+  apply();
 
   // Reformat the refresh time into the viewer's local timezone (falls back to
   // the embedded UTC text if JS is off or the date can't be parsed).
@@ -612,6 +728,7 @@ def resolve_candidates(start: str, end: str, args) -> list[dict]:
         it["platform"] = "/".join(p["name"] for p in mine)           # string for terminal/push
         gmap = gm_movie if it["kind"] == "Movie" else gm_tv
         it["genres"] = [gmap[g] for g in it.get("genre_ids", []) if g in gmap]
+        it["is_indian"] = is_indian(it)
         time.sleep(0.02)  # be gentle on TMDB
     return candidates
 
@@ -633,6 +750,9 @@ def main() -> int:
                          "(for iterating on HTML/format). The pipeline runs without it.")
     ap.add_argument("--notify", choices=["auto", "always", "never"], default="auto",
                     help="Pushcut policy: auto = only on Fridays; always = every run; never = off")
+    ap.add_argument("--include-indian", action="store_true",
+                    help="Include Indian titles in the terminal list and the Pushcut "
+                         "notification (the HTML page always carries them, behind a toggle)")
     args = ap.parse_args()
 
     if not TMDB_KEY:
@@ -641,31 +761,54 @@ def main() -> int:
 
     if args.start and args.end:
         start, end = args.start, args.end
+        span = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days + 1
     else:
         mon, sun = week_window(dt.date.today())
         start, end = mon.isoformat(), sun.isoformat()
+        span = 7
+    # The preceding window of equal length — "last week" on the page, so a Monday
+    # or Tuesday check-in can still see how the previous weekend's releases ranked.
+    prev_end = dt.date.fromisoformat(start) - dt.timedelta(days=1)
+    prev_start = prev_end - dt.timedelta(days=span - 1)
 
     print(f"Week window: {start} → {end}  (region {REGION})")
+    print(f"Prior week:  {prev_start} → {prev_end}")
     print(f"Services: {', '.join(PROVIDERS)}\n")
 
-    # The pipeline fetches fresh every run. --cache is a dev-only shortcut so we
-    # can iterate on HTML/formatting without re-hitting the APIs each time.
-    cache_path = resolved_cache_path(start, end, args)
-    cached = (args.cache and os.path.exists(cache_path)
-              and (time.time() - os.path.getmtime(cache_path)) < RESOLVED_TTL_H * 3600)
-    if cached:
-        with open(cache_path, encoding="utf-8") as fh:
-            candidates = json.load(fh)
-        age_min = int((time.time() - os.path.getmtime(cache_path)) / 60)
-        print(f"[--cache] Loaded {len(candidates)} releases from disk ({age_min}m old).\n")
-    else:
-        candidates = resolve_candidates(start, end, args)
+    def load_week(w_start: str, w_end: str) -> list[dict]:
+        """Resolve one window, honouring the --cache dev shortcut.
+
+        The pipeline fetches fresh every run. --cache is a dev-only shortcut so we
+        can iterate on HTML/formatting without re-hitting the APIs each time; the
+        cache path is keyed by window, so the two weeks never collide.
+        """
+        cache_path = resolved_cache_path(w_start, w_end, args)
+        if (args.cache and os.path.exists(cache_path)
+                and (time.time() - os.path.getmtime(cache_path)) < RESOLVED_TTL_H * 3600):
+            with open(cache_path, encoding="utf-8") as fh:
+                found = json.load(fh)
+            age_min = int((time.time() - os.path.getmtime(cache_path)) / 60)
+            print(f"[--cache] Loaded {len(found)} releases for {w_start}→{w_end} "
+                  f"from disk ({age_min}m old).\n")
+            return found
+        found = resolve_candidates(w_start, w_end, args)
         if args.cache:
             os.makedirs(CACHE_DIR, exist_ok=True)
             with open(cache_path, "w", encoding="utf-8") as fh:
-                json.dump(candidates, fh)
+                json.dump(found, fh)
+        return found
 
-    if not candidates:
+    candidates = load_week(start, end)
+    # Last week is best-effort: it's a nice-to-have panel, so a TMDB hiccup there
+    # must not take down the page for the week that actually matters.
+    try:
+        prev_candidates = load_week(prev_start.isoformat(), prev_end.isoformat())
+    except Exception as e:
+        print(f"WARNING: could not load last week ({e}); page will show this week only.",
+              file=sys.stderr)
+        prev_candidates = []
+
+    if not candidates and not prev_candidates:
         print("\nNo brand-new movies or new series/seasons on your services this week.")
         return 0
 
@@ -677,16 +820,27 @@ def main() -> int:
     def passes_floor(it: dict) -> bool:
         return it["votes"] >= args.min_votes or (it["on_my_services"] and it["votes"] == 0)
 
-    # shown_all = everything this week (page's 'All' view);
-    # shown = the subset on your subscriptions (default 'My Services' view).
-    shown_all = [it for it in candidates if passes_floor(it)]
-    shown_all.sort(key=lambda x: (x["rating"] or 0, x["votes"]), reverse=True)
+    def ranked(pool: list[dict]) -> list[dict]:
+        """Vote-floored and sorted best-first — the page's 'All' view for a window."""
+        out = [it for it in pool if passes_floor(it)]
+        out.sort(key=lambda x: (x["rating"] or 0, x["votes"]), reverse=True)
+        return out
+
+    # shown_all = everything this week (page's 'All' view, now the default);
+    # shown = the subset on your subscriptions, which is what the terminal list and
+    # the Pushcut notification report. Indian titles are dropped from those two
+    # surfaces by default (matching the page's default-on toggle) — the page itself
+    # still receives every title, since its toggle filters client-side.
+    shown_all = ranked(candidates)
+    prev_shown_all = ranked(prev_candidates)
     shown = [it for it in shown_all if it["on_my_services"]]
+    if not args.include_indian:
+        shown = [it for it in shown if not it.get("is_indian")]
     dropped = len(candidates) - len(shown_all)
     if dropped:
         print(f"(Hid {dropped} title(s) with fewer than {args.min_votes} IMDb votes.)\n")
 
-    if not shown_all:
+    if not shown_all and not prev_shown_all:
         print(f"No titles with at least {args.min_votes} IMDb votes this week. "
               f"Re-run with --min-votes 0 to see everything.")
         return 0
@@ -710,29 +864,47 @@ def main() -> int:
     extra = len(shown_all) - len(shown)
     if extra:
         print(f"+{extra} more new this week not on your services — see the 'All' tab on the page.")
+    if prev_shown_all:
+        print(f"+{len(prev_shown_all)} from last week — see the 'Last Week' tab on the page.")
 
     # Write the HTML page (nice mobile layout — the real viewing surface).
-    # Pass the full set; the page tags each card and the toggle filters client-side.
+    # Pass both weeks in full; the page tags every card with week / on-my-services /
+    # is-Indian and the three toggles filter client-side.
     if args.html_out:
         now_utc = dt.datetime.now(dt.timezone.utc)
         generated = now_utc.strftime("%a, %b %-d %Y · %H:%M UTC")  # no-JS fallback
         generated_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")     # JS -> viewer's tz
-        html = generate_html(shown_all, start, end, generated, generated_iso)
+        weeks = [
+            {"key": "this", "label": "This Week", "start": start, "end": end,
+             "items": shown_all},
+            {"key": "last", "label": "Last Week", "start": prev_start.isoformat(),
+             "end": prev_end.isoformat(), "items": prev_shown_all},
+        ]
+        html = generate_html(weeks, generated, generated_iso)
         d = os.path.dirname(args.html_out)
         if d:
             os.makedirs(d, exist_ok=True)
         with open(args.html_out, "w", encoding="utf-8") as fh:
             fh.write(html)
-        print(f"Wrote {args.html_out} ({len(shown)} releases).")
+        print(f"Wrote {args.html_out} "
+              f"({len(shown_all)} this week + {len(prev_shown_all)} last week).")
 
     # Decide whether to notify: auto = Fridays only, always = every run, never = off.
+    # An empty list is never worth a buzz — with the vote floor, the my-services
+    # filter and the Indian filter all applied, `shown` can be empty on a week the
+    # page still has plenty on it.
     is_friday = dt.date.today().weekday() == 4
-    should_notify = args.notify == "always" or (args.notify == "auto" and is_friday)
+    should_notify = (bool(shown)
+                     and (args.notify == "always" or (args.notify == "auto" and is_friday)))
 
     # Push to the phone via Pushcut, if configured and the policy allows.
     if PUSHCUT_WEBHOOK and not should_notify:
-        reason = ("notifications disabled" if args.notify == "never"
-                  else f"auto policy notifies Fridays only; today is {dt.date.today():%A}")
+        if not shown:
+            reason = "nothing new on your services this week"
+        elif args.notify == "never":
+            reason = "notifications disabled"
+        else:
+            reason = f"auto policy notifies Fridays only; today is {dt.date.today():%A}"
         print(f"Skipping Pushcut ({reason}).")
     if PUSHCUT_WEBHOOK and should_notify:
         nice_dates = f"{start[5:].replace('-', '/')}–{end[5:].replace('-', '/')}"

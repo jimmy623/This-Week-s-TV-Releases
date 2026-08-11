@@ -5,11 +5,15 @@ name: This Week's Releases
 on:
   push:
     branches: [main]       # rebuild the page whenever code lands on main
+    paths-ignore:
+      - '.last-refresh'    # the keepalive stamp below — not worth a rebuild, and
+                           # ignoring it is what stops the keepalive from looping
   schedule:
     - cron: "0 15 * * *"   # daily 15:00 UTC = 11:00 EDT (10:00 EST in winter)
   workflow_dispatch: {}
 
-# Needed for GitHub Pages deploys.
+# Needed for GitHub Pages deploys. The keepalive step pushes with its own PAT, so
+# the job's GITHUB_TOKEN still only needs read access to contents.
 permissions:
   contents: read
   pages: write
@@ -48,7 +52,7 @@ jobs:
         uses: actions/deploy-pages@v5
 
       # Page is now live — send the Pushcut notification linking to it.
-      # Scheduled runs notify only on Fridays (--notify auto); manual runs always.
+      # Scheduled runs notify only on Fridays; manual runs always.
       # --cache reuses the data from the Generate step (no extra API calls).
       - name: Notify via Pushcut
         env:
@@ -56,3 +60,48 @@ jobs:
           PUSHCUT_WEBHOOK: ${{ secrets.PUSHCUT_WEBHOOK }}
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
         run: python3 this_weeks_releases.py --cache --html-out '' --notify ${{ github.event_name == 'workflow_dispatch' && 'always' || 'auto' }}
+
+      # Push a timestamp back to main so the repo keeps registering activity.
+      #
+      # GitHub auto-disables `schedule:` triggers after 60 days without repository
+      # activity, and this repo by design never receives organic commits. That is
+      # exactly what silently killed the daily run on 2026-08-06: re-enabling the
+      # workflow in the UI flipped its state back to active but did not resume the
+      # cron, because workflow runs (including manual dispatches) do NOT count as
+      # activity. Only a push does.
+      #
+      # Uses a PAT rather than the built-in GITHUB_TOKEN: token pushes are
+      # attributed to the Actions bot and are not a dependable activity signal.
+      # Runs even when an earlier step failed, so a bad TMDB day still keeps the
+      # schedule alive — but never fails the job, since the page is already live.
+      - name: Keepalive commit
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          KEEPALIVE_PAT: ${{ secrets.KEEPALIVE_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEEPALIVE_PAT:-}" ]; then
+            echo "::warning::KEEPALIVE_PAT is not set — skipping keepalive. Without it, GitHub will auto-disable this workflow's daily schedule after 60 days with no push."
+            exit 0
+          fi
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .last-refresh
+          git config user.name  "jimmy623"
+          git config user.email "jimmy623@users.noreply.github.com"
+          git add .last-refresh
+          if git diff --cached --quiet; then
+            echo "Stamp unchanged — nothing to push."
+            exit 0
+          fi
+          git commit -m "chore: daily refresh stamp (keeps the Actions schedule alive)"
+          git remote set-url --push origin "https://x-access-token:${KEEPALIVE_PAT}@github.com/${GITHUB_REPOSITORY}.git"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "Keepalive pushed on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Push failed (attempt ${attempt}) — rebasing onto origin/main and retrying."
+            git fetch origin main
+            git rebase origin/main || { git rebase --abort || true; break; }
+          done
+          echo "::warning::Keepalive push did not land. The daily schedule is at risk if this keeps happening."
