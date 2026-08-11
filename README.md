@@ -35,6 +35,26 @@ a second line would shove the whole list down every time you toggled.
 Last week is there so a Monday or Tuesday check-in can still see how the previous
 weekend's releases ranked.
 
+### Refreshing it from the iOS Home Screen
+
+Added to the Home Screen the page runs standalone — no address bar, so no reload
+button, and iOS resumes a suspended app showing whatever it last rendered. On top
+of that GitHub Pages serves the page with `Cache-Control: max-age=600` and offers
+no way to change it, so even a genuine reload inside 10 minutes can be answered
+from the browser or CDN cache. Force-quitting used to be the only reliable fix.
+
+Two ways out now, both appending a `?r=<timestamp>` cache-buster so the reload
+actually reaches the origin:
+
+- **☰ → Refresh** — reloads immediately, whenever you want it.
+- **Automatic on return** — if the app has been open more than 5 minutes when it
+  comes back to the foreground, it fetches `version.txt` (a ~20-byte sidecar
+  holding the build timestamp) and reloads *only if the build changed*. Cheap
+  enough to do on every foreground, and it won't throw away your scroll position
+  several times a day for data that hasn't moved.
+
+### Cards
+
 Every card shows **one** provider row — your services first (highlighted), then
 everything else, capped at `PILL_CAP` behind a tappable `+N`. It's deliberately
 the same markup in both Services views: rendering a different pill set per view

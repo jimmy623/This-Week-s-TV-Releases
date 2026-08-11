@@ -587,6 +587,7 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
   .toggle {{ display:inline-flex; background:#11151d; border:1px solid #232838; border-radius:999px; padding:2px; flex:0 0 auto; }}
   .toggle button {{ appearance:none; -webkit-appearance:none; border:0; background:transparent; color:#9aa1ad; font:inherit; font-size:12.5px; font-weight:600; padding:5px 12px; border-radius:999px; cursor:pointer; }}
   .toggle button.active {{ background:#2a3142; color:#e7e9ee; }}
+  .mbtn {{ appearance:none; -webkit-appearance:none; flex:0 0 auto; font-family:inherit; font-size:12.5px; font-weight:600; color:#c3cad6; background:#11151d; border:1px solid #232838; border-radius:999px; padding:6px 14px; cursor:pointer; }}
   .switch {{ cursor:pointer; user-select:none; -webkit-user-select:none; }}
   .switch input {{ appearance:none; -webkit-appearance:none; margin:0; width:34px; height:20px; border-radius:999px; background:#2a3142; position:relative; flex:0 0 auto; transition:background .15s; cursor:pointer; }}
   .switch input::after {{ content:""; position:absolute; top:2px; left:2px; width:16px; height:16px; border-radius:50%; background:#e7e9ee; transition:transform .15s; }}
@@ -626,6 +627,10 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
       <span class="mlabel">Hide Indian titles</span>
       <input type="checkbox" id="hide-indian" checked>
     </label>
+    <div class="mrow">
+      <span class="mlabel">Data</span>
+      <button id="refresh" class="mbtn" type="button">Refresh</button>
+    </div>
   </div>
 </header>
 <main>{''.join(cards)}
@@ -712,6 +717,37 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
   document.addEventListener('click', function(e) {{
     var t = e.target, more = t && t.closest ? t.closest('.pill.more') : null;
     if (more && more.parentNode) more.parentNode.classList.add('expanded');
+  }});
+
+  // --- Staying fresh in an iOS Home Screen web app -------------------------
+  // Launched from the Home Screen there's no address bar, so no reload button,
+  // and iOS resumes a suspended app showing whatever it last rendered. Worse,
+  // GitHub Pages serves this page with Cache-Control: max-age=600 and doesn't
+  // let us change that — so even a real reload inside 10 minutes can be answered
+  // from the browser or CDN cache. Hence the ?r= cache-buster on every reload.
+  var refEl = el('refreshed'),
+      STAMP = refEl ? refEl.getAttribute('data-ts') : '',
+      loadedAt = Date.now(),
+      STALE_MS = 5 * 60 * 1000,
+      refreshBtn = el('refresh');
+
+  function hardReload() {{
+    location.replace(location.pathname + '?r=' + Date.now() + location.hash);
+  }}
+  if (refreshBtn) refreshBtn.addEventListener('click', hardReload);
+
+  // Coming back to the app: ask the 20-byte sidecar whether the build actually
+  // changed, and only then reload. Reloading unconditionally would throw away
+  // your scroll position several times a day for no new data.
+  function checkForNewBuild() {{
+    if (!window.fetch || !STAMP || Date.now() - loadedAt < STALE_MS) return;
+    fetch('version.txt?t=' + Date.now(), {{ cache: 'no-store' }})
+      .then(function(res) {{ return res.ok ? res.text() : null; }})
+      .then(function(txt) {{ if (txt && txt.trim() !== STAMP) hardReload(); }})
+      .catch(function() {{}});  // offline: keep showing the cached page
+  }}
+  document.addEventListener('visibilitychange', function() {{
+    if (!document.hidden) checkForNewBuild();
   }});
 
   // Reformat the refresh time into the viewer's local timezone (falls back to
@@ -957,6 +993,13 @@ def main() -> int:
             os.makedirs(d, exist_ok=True)
         with open(args.html_out, "w", encoding="utf-8") as fh:
             fh.write(html)
+        # A 20-byte sidecar holding this build's timestamp. The page polls it when
+        # it comes back to the foreground so it can tell "new build, reload" from
+        # "nothing changed, don't yank the scroll position" — without re-fetching
+        # 120KB of HTML just to compare one string.
+        with open(os.path.join(d, "version.txt") if d else "version.txt",
+                  "w", encoding="utf-8") as fh:
+            fh.write(generated_iso)
         print(f"Wrote {args.html_out} "
               f"({len(shown_all)} this week + {len(prev_shown_all)} last week).")
 
