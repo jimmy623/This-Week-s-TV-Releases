@@ -537,9 +537,11 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
   html {{ -webkit-text-size-adjust:100%; }}
   body {{ margin:0; background:#0b0d12; color:#e7e9ee; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; }}
   a {{ -webkit-tap-highlight-color:rgba(255,255,255,.06); }}
-  header {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:11px 14px; position:sticky; top:0; z-index:2; background:#0b0d12e8; backdrop-filter:blur(8px); border-bottom:1px solid #1a1e29; padding-top:max(11px, env(safe-area-inset-top)); }}
-  h1 {{ margin:0; font-size:17px; font-weight:700; }}
-  .meta {{ color:#828a98; font-size:13px; }}
+  /* nowrap throughout: the header is sticky, so anything that wraps changes its
+     height and shoves the whole list down. Long metadata ellipsises instead. */
+  header {{ display:flex; align-items:center; gap:8px; flex-wrap:nowrap; padding:11px 14px; position:sticky; top:0; z-index:2; background:#0b0d12e8; backdrop-filter:blur(8px); border-bottom:1px solid #1a1e29; padding-top:max(11px, env(safe-area-inset-top)); }}
+  h1 {{ margin:0; font-size:17px; font-weight:700; white-space:nowrap; flex:0 0 auto; }}
+  .meta {{ color:#828a98; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }}
   main {{ padding:6px 11px 40px; max-width:680px; margin:0 auto; }}
   .card {{ display:flex; align-items:stretch; background:#161a22; border:1px solid #232838; border-radius:14px; overflow:hidden; margin:10px 0; }}
   .poster {{ width:34vw; max-width:118px; min-width:96px; flex:0 0 auto; background:#232838 center/cover no-repeat; display:block; position:relative; }}
@@ -565,13 +567,18 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
   .tag {{ font-size:11px; color:#9aa1ad; border:1px solid #2c3342; border-radius:6px; padding:2px 7px; }}
   .overview {{ color:#9aa1ad; font-size:13px; line-height:1.42; margin:7px 0 0; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }}
   footer {{ text-align:center; color:#5c636f; font-size:12px; padding:8px 20px 28px; }}
-  .htext {{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; min-width:0; }}
+  .htext {{ display:flex; align-items:baseline; gap:8px; flex-wrap:nowrap; min-width:0; overflow:hidden; }}
   .empty {{ display:none; text-align:center; color:#5c636f; font-size:14px; padding:36px 20px; }}
 
   /* All three filters live in the top-right menu, so the header stays one line. */
-  .iconbtn {{ margin-left:auto; flex:0 0 auto; appearance:none; -webkit-appearance:none; display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; padding:0; background:#11151d; border:1px solid #232838; border-radius:10px; color:#c3cad6; cursor:pointer; }}
+  .iconbtn {{ position:relative; margin-left:auto; flex:0 0 auto; appearance:none; -webkit-appearance:none; display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; padding:0; background:#11151d; border:1px solid #232838; border-radius:10px; color:#c3cad6; cursor:pointer; }}
   .iconbtn svg {{ width:18px; height:18px; display:block; }}
   .iconbtn[aria-expanded="true"] {{ background:#2a3142; border-color:#39415a; color:#e7e9ee; }}
+  /* A filter is set to something you can't infer from the header. Deliberately a
+     fixed-size dot on a fixed-size button, not text — text here would re-wrap the
+     header. Week isn't included: the date range already gives it away. */
+  .iconbtn::after {{ content:""; position:absolute; top:5px; right:5px; width:6px; height:6px; border-radius:50%; background:#3d6be0; opacity:0; }}
+  body.view-mine .iconbtn::after, body:not(.hide-indian) .iconbtn::after {{ opacity:1; }}
   .menu {{ position:absolute; top:calc(100% + 8px); right:14px; z-index:3; min-width:238px; background:#131721; border:1px solid #2a3142; border-radius:14px; padding:4px 6px; box-shadow:0 16px 38px rgba(0,0,0,.55); }}
   .menu[hidden] {{ display:none; }}
   .mrow {{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:9px 6px; }}
@@ -594,7 +601,7 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
 <header>
   <div class="htext">
     <h1>🍿 New Releases</h1>
-    <span class="meta"><span id="count">0</span> titles · <span id="dates">{first_dates}</span><span id="scope"></span></span>
+    <span class="meta"><span id="count">0</span> titles · <span id="dates">{first_dates}</span></span>
   </div>
   <button id="menu-btn" class="iconbtn" type="button" aria-label="Filters"
           aria-haspopup="true" aria-expanded="false" aria-controls="menu">
@@ -647,7 +654,7 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
       tabThis = el('tab-this'), tabLast = el('tab-last'),
       chk = el('hide-indian'), countEl = el('count'),
       datesEl = el('dates'), emptyEl = el('empty'),
-      scopeEl = el('scope'), menuEl = el('menu'), menuBtn = el('menu-btn');
+      menuEl = el('menu'), menuBtn = el('menu-btn');
 
   // Single source of truth: CSS does the hiding, this recomputes the visible
   // count with the same three predicates so the header can never disagree.
@@ -674,8 +681,6 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
     }}
     countEl.textContent = n;
     datesEl.textContent = DATES[wk] || '';
-    // The toggles are behind the menu now, so surface the non-default scope here.
-    scopeEl.textContent = showAll ? '' : ' · My Services';
     emptyEl.style.display = n ? 'none' : 'block';
   }}
 

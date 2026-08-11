@@ -27,6 +27,10 @@ client-side (so switching costs no round-trip), and persist per-device in
 | Hide Indian titles | **on** |
 
 Each toggle puts its default on the right, so the resting state reads as one column.
+A blue dot on ☰ means a filter is set to something the header can't show you —
+Services on Mine, or Indian titles unhidden. (Week needs no dot; the date range
+already says which one you're on.) The header itself never wraps: it's sticky, so
+a second line would shove the whole list down every time you toggled.
 
 Last week is there so a Monday or Tuesday check-in can still see how the previous
 weekend's releases ranked.
