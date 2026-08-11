@@ -22,9 +22,11 @@ client-side (so switching costs no round-trip), and persist per-device in
 
 | Toggle | Default |
 | --- | --- |
-| Week: This / Last | This |
+| Week: Last / This | This |
 | Services: Mine / All | **All** |
 | Hide Indian titles | **on** |
+
+Each toggle puts its default on the right, so the resting state reads as one column.
 
 Last week is there so a Monday or Tuesday check-in can still see how the previous
 weekend's releases ranked.
@@ -80,6 +82,12 @@ read and write` scoped to this repo**, stored as `KEEPALIVE_PAT`; the built-in
 `GITHUB_TOKEN` attributes its pushes to the Actions bot and isn't a dependable
 activity signal. The `push:` trigger has `paths-ignore: ['.last-refresh']` so the
 keepalive commit can't loop.
+
+The checkout step needs `persist-credentials: false` for any of that to work.
+Otherwise `actions/checkout` leaves a `GITHUB_TOKEN` `Authorization` header in
+`.git/config`, git prefers it over the credentials in the push URL, and the
+keepalive push goes out as `github-actions[bot]` — a 403 the step swallows as a
+warning.
 
 Without the secret the workflow still works — the step logs a warning and skips —
 but the schedule will silently die again after 60 days.
