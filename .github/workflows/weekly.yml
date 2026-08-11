@@ -94,6 +94,14 @@ jobs:
             exit 0
           fi
           git commit -m "chore: daily refresh stamp (keeps the Actions schedule alive)"
+          # actions/checkout stores an Authorization header for GITHUB_TOKEN in the
+          # local git config, and that header BEATS credentials embedded in the
+          # remote URL. Leave it in place and the push goes out as
+          # github-actions[bot] and 403s — which is exactly how this failed the
+          # first time it ran for real (run 18:33 UTC on 2026-08-11).
+          for k in $(git config --local --name-only --get-regexp '^http\..*\.extraheader$' || true); do
+            git config --local --unset-all "$k" || true
+          done
           git remote set-url --push origin "https://x-access-token:${KEEPALIVE_PAT}@github.com/${GITHUB_REPOSITORY}.git"
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
