@@ -16,17 +16,23 @@ week. Ongoing weekly episodes of existing shows are excluded.
 ## The page
 
 Each run builds a single self-contained HTML page carrying **both this week and
-last week**, with three filters that all run client-side (so switching costs no
-round-trip) and persist per-device in `localStorage`:
+last week**. All three filters live behind the ☰ button at the top right, run
+client-side (so switching costs no round-trip), and persist per-device in
+`localStorage`:
 
-| Toggle | Where | Default |
-| --- | --- | --- |
-| This Week / Last Week | header | This Week |
-| My Services / All | header | **All** |
-| Hide Indian titles | bottom of page | **on** |
+| Toggle | Default |
+| --- | --- |
+| Week: This / Last | This |
+| Services: Mine / All | **All** |
+| Hide Indian titles | **on** |
 
 Last week is there so a Monday or Tuesday check-in can still see how the previous
 weekend's releases ranked.
+
+Every card shows **one** provider row — your services first (highlighted), then
+everything else, capped at `PILL_CAP` behind a tappable `+N`. It's deliberately
+the same markup in both Services views: rendering a different pill set per view
+made cards change height whenever the toggle flipped.
 
 Indian titles are detected from TMDB's `original_language` and `origin_country`.
 The logic deliberately errs toward letting one through rather than wrongly hiding

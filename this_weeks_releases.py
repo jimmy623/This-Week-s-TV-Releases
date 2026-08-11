@@ -86,6 +86,11 @@ INDIAN_LANGS = {
 # country. Guessing here would wrongly hide Pakistani and Bangladeshi titles.
 INDIAN_SHARED_LANGS = {"ur", "bn"}
 
+# Providers shown on a card before the rest collapse behind a "+N" pill. Bounds
+# the pill row to ~2 lines on a phone; without it a title on nine services makes
+# its card half again as tall as its neighbours.
+PILL_CAP = 4
+
 TMDB_KEY = os.environ.get("TMDB_API_KEY")
 PUSHCUT_WEBHOOK = os.environ.get("PUSHCUT_WEBHOOK")  # optional: push results to iPhone
 PAGE_URL = os.environ.get("PAGE_URL")  # optional: hosted HTML page the notification links to
@@ -347,12 +352,16 @@ def tv_networks_mine(tmdb_id: int) -> list[dict]:
     return out
 
 
-def watch_info(kind: str, tmdb_id: int) -> tuple[list[dict], list[str]]:
-    """US flatrate streaming for a title, as (mine, all_names).
+def watch_info(kind: str, tmdb_id: int) -> tuple[list[dict], list[dict]]:
+    """US flatrate streaming for a title, as (mine, providers).
 
     mine      -> [{name, logo}] limited to OUR services, with a network fallback
                  for brand-new shows whose provider data hasn't landed yet.
-    all_names -> every US flatrate provider name (for the unfiltered 'All' view).
+    providers -> EVERY US flatrate service as [{name, logo, mine}], ours first.
+
+    Deliberately one merged list rather than two: the card renders the same pill
+    row in both views, so flipping My Services <-> All can't change a card's
+    height. Ours keep their short display names ("Prime"), the rest keep TMDB's.
     """
     path = f"/movie/{tmdb_id}/watch/providers" if kind == "Movie" else f"/tv/{tmdb_id}/watch/providers"
     try:
@@ -360,21 +369,18 @@ def watch_info(kind: str, tmdb_id: int) -> tuple[list[dict], list[str]]:
     except Exception:
         us = {}
     mine: list[dict] = []
-    all_names: list[str] = []
+    others: list[dict] = []
     for p in us.get("flatrate", []):
-        pname = p.get("provider_name") or ""
-        if pname and pname not in all_names:
-            all_names.append(pname)
+        logo = p.get("logo_path") or ""
         name = PROVIDER_DISPLAY.get(p.get("provider_id"))
-        if name and name not in [o["name"] for o in mine]:
-            mine.append({"name": name, "logo": p.get("logo_path") or ""})
+        bucket, label = (mine, name) if name else (others, p.get("provider_name") or "")
+        if label and label not in [o["name"] for o in bucket]:
+            bucket.append({"name": label, "logo": logo})
     if not mine and kind == "TV":  # provider data not in yet — try the network
-        fb = tv_networks_mine(tmdb_id)
-        if fb:
-            mine = fb
-            if not all_names:
-                all_names = [o["name"] for o in fb]
-    return mine, all_names
+        mine = tv_networks_mine(tmdb_id)
+    providers = ([dict(o, mine=True) for o in mine]
+                 + [dict(o, mine=False) for o in others])
+    return mine, providers
 
 
 def streaming_date(tmdb_id: int, start: str, end: str) -> str | None:
@@ -451,15 +457,28 @@ def _card_html(it: dict, week_key: str) -> str:
         poster_el = f'<div class="{pclass}"{pstyle}>{pinner}{chip}</div>'
 
     # Neutral pill; the small logo carries the brand color, not the whole pill.
-    # Two sets: 'mine' (our services, with logos) for the My Services view, and
-    # 'all' (every service, plain text) for the All view — toggled in the header.
-    pills_mine = ""
-    for p in it.get("platforms", []):
-        logo = (f'<img class="plogo" src="https://image.tmdb.org/t/p/w45{p["logo"]}" alt="">'
-                if p.get("logo") else "")
-        pills_mine += f'<span class="pill">{logo}{_esc(p["name"])}</span>'
-    pills_all = "".join(f'<span class="pill">{_esc(n)}</span>'
-                        for n in it.get("all_providers", []))
+    # ONE row for both views — our services first (subtly highlighted), then the
+    # rest, capped at PILL_CAP behind a "+N". Identical markup either way, so the
+    # My Services / All toggle changes which cards show, never how tall they are.
+    provs = it.get("all_providers") or []
+    pills = ""
+    for i, p in enumerate(provs):
+        cls = "pill"
+        logo = ""
+        if p.get("logo"):
+            cls += " logo"
+            logo = (f'<img class="plogo" loading="lazy" alt="" '
+                    f'src="https://image.tmdb.org/t/p/w45{p["logo"]}">')
+        if p.get("mine"):
+            cls += " mine"
+        if i >= PILL_CAP:
+            cls += " extra"
+        pills += f'<span class="{cls}">{logo}{_esc(p["name"])}</span>'
+    if len(provs) > PILL_CAP:
+        n_more = len(provs) - PILL_CAP
+        pills += (f'<button class="pill more" type="button" '
+                  f'aria-label="Show {n_more} more">+{n_more}</button>')
+    pills = f'<div class="pills">{pills}</div>' if pills else ""
 
     # Up to 3 genre tags.
     tags = "".join(f'<span class="tag">{_esc(gname)}</span>'
@@ -480,8 +499,7 @@ def _card_html(it: dict, week_key: str) -> str:
             <span class="rating" style="color:{fg};background:{bg}">{rating}</span>
             {title_el}
           </div>
-          <div class="pills pills-mine">{pills_mine}</div>
-          <div class="pills pills-all">{pills_all}</div>
+          {pills}
           {tags}
           <div class="overview">{overview}</div>
         </div>
@@ -522,7 +540,7 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
   header {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:11px 14px; position:sticky; top:0; z-index:2; background:#0b0d12e8; backdrop-filter:blur(8px); border-bottom:1px solid #1a1e29; padding-top:max(11px, env(safe-area-inset-top)); }}
   h1 {{ margin:0; font-size:17px; font-weight:700; }}
   .meta {{ color:#828a98; font-size:13px; }}
-  main {{ padding:6px 11px 16px; max-width:680px; margin:0 auto; }}
+  main {{ padding:6px 11px 40px; max-width:680px; margin:0 auto; }}
   .card {{ display:flex; align-items:stretch; background:#161a22; border:1px solid #232838; border-radius:14px; overflow:hidden; margin:10px 0; }}
   .poster {{ width:34vw; max-width:118px; min-width:96px; flex:0 0 auto; background:#232838 center/cover no-repeat; display:block; position:relative; }}
   .poster.noimg {{ display:flex; align-items:center; justify-content:center; font-size:30px; color:#5c636f; text-decoration:none; }}
@@ -534,58 +552,78 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
   a.title {{ color:inherit; text-decoration:none; }}
   .dim {{ color:#8b92a0; font-weight:400; font-size:13.5px; }}
   .pills {{ margin:7px 0 0; display:flex; gap:6px; flex-wrap:wrap; }}
-  .pill {{ display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:500; color:#aab2bf; background:#1a1f2b; border:1px solid #262c3a; padding:3px 9px 3px 4px; border-radius:999px; }}
+  .pill {{ display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:500; color:#8f97a4; background:#1a1f2b; border:1px solid #262c3a; padding:3px 9px; border-radius:999px; }}
+  .pill.logo {{ padding-left:4px; }}
+  .pill.mine {{ color:#cfd6e2; background:#1d2434; border-color:#33405c; }}  /* one of yours */
   .plogo {{ width:17px; height:17px; border-radius:5px; background:#fff; object-fit:contain; padding:1px; }}
+  /* Overflow beyond PILL_CAP, revealed by tapping the "+N" pill. */
+  .pill.extra {{ display:none; }}
+  .pills.expanded .pill.extra {{ display:inline-flex; }}
+  .pills.expanded .pill.more {{ display:none; }}
+  .pill.more {{ appearance:none; -webkit-appearance:none; margin:0; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; }}
   .tags {{ margin:7px 0 0; display:flex; gap:6px; flex-wrap:wrap; }}
   .tag {{ font-size:11px; color:#9aa1ad; border:1px solid #2c3342; border-radius:6px; padding:2px 7px; }}
   .overview {{ color:#9aa1ad; font-size:13px; line-height:1.42; margin:7px 0 0; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }}
   footer {{ text-align:center; color:#5c636f; font-size:12px; padding:8px 20px 28px; }}
   .htext {{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; min-width:0; }}
-  .toggles {{ margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }}
+  .empty {{ display:none; text-align:center; color:#5c636f; font-size:14px; padding:36px 20px; }}
+
+  /* All three filters live in the top-right menu, so the header stays one line. */
+  .iconbtn {{ margin-left:auto; flex:0 0 auto; appearance:none; -webkit-appearance:none; display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; padding:0; background:#11151d; border:1px solid #232838; border-radius:10px; color:#c3cad6; cursor:pointer; }}
+  .iconbtn svg {{ width:18px; height:18px; display:block; }}
+  .iconbtn[aria-expanded="true"] {{ background:#2a3142; border-color:#39415a; color:#e7e9ee; }}
+  .menu {{ position:absolute; top:calc(100% + 8px); right:14px; z-index:3; min-width:238px; background:#131721; border:1px solid #2a3142; border-radius:14px; padding:4px 6px; box-shadow:0 16px 38px rgba(0,0,0,.55); }}
+  .menu[hidden] {{ display:none; }}
+  .mrow {{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:9px 6px; }}
+  .mrow + .mrow {{ border-top:1px solid #1e2431; }}
+  .mlabel {{ color:#9aa1ad; font-size:13px; font-weight:500; white-space:nowrap; }}
   .toggle {{ display:inline-flex; background:#11151d; border:1px solid #232838; border-radius:999px; padding:2px; flex:0 0 auto; }}
   .toggle button {{ appearance:none; -webkit-appearance:none; border:0; background:transparent; color:#9aa1ad; font:inherit; font-size:12.5px; font-weight:600; padding:5px 12px; border-radius:999px; cursor:pointer; }}
   .toggle button.active {{ background:#2a3142; color:#e7e9ee; }}
-  .empty {{ display:none; text-align:center; color:#5c636f; font-size:14px; padding:36px 20px; }}
-  /* Page-level preferences live down here, out of the header's way. */
-  .prefs {{ max-width:680px; margin:0 auto; padding:0 11px; display:flex; justify-content:center; }}
-  .switch {{ display:inline-flex; align-items:center; gap:10px; color:#828a98; font-size:13px; cursor:pointer; user-select:none; -webkit-user-select:none; padding:9px 14px; background:#11151d; border:1px solid #232838; border-radius:999px; }}
+  .switch {{ cursor:pointer; user-select:none; -webkit-user-select:none; }}
   .switch input {{ appearance:none; -webkit-appearance:none; margin:0; width:34px; height:20px; border-radius:999px; background:#2a3142; position:relative; flex:0 0 auto; transition:background .15s; cursor:pointer; }}
   .switch input::after {{ content:""; position:absolute; top:2px; left:2px; width:16px; height:16px; border-radius:50%; background:#e7e9ee; transition:transform .15s; }}
   .switch input:checked {{ background:#3d6be0; }}
   .switch input:checked::after {{ transform:translateX(14px); }}
+
   body.view-mine .card[data-mine="0"] {{ display:none; }}
   body.hide-indian .card[data-indian="1"] {{ display:none; }}
   body.week-this .card[data-week="last"] {{ display:none; }}
   body.week-last .card[data-week="this"] {{ display:none; }}
-  .pills-all {{ display:none; }}
-  body.view-all .pills-all {{ display:flex; }}
-  body.view-all .pills-mine {{ display:none; }}
 </style></head><body class="view-all week-this hide-indian">
 <header>
   <div class="htext">
     <h1>🍿 New Releases</h1>
-    <span class="meta"><span id="count">0</span> titles · <span id="dates">{first_dates}</span></span>
+    <span class="meta"><span id="count">0</span> titles · <span id="dates">{first_dates}</span><span id="scope"></span></span>
   </div>
-  <div class="toggles">
-    <div class="toggle" role="tablist">
-      <button id="tab-this" class="active" type="button">This Week</button>
-      <button id="tab-last" type="button">Last Week</button>
+  <button id="menu-btn" class="iconbtn" type="button" aria-label="Filters"
+          aria-haspopup="true" aria-expanded="false" aria-controls="menu">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+  </button>
+  <div id="menu" class="menu" role="group" aria-label="Filters" hidden>
+    <div class="mrow">
+      <span class="mlabel">Week</span>
+      <div class="toggle">
+        <button id="tab-this" class="active" type="button">This</button>
+        <button id="tab-last" type="button">Last</button>
+      </div>
     </div>
-    <div class="toggle" role="tablist">
-      <button id="tab-mine" type="button">My Services</button>
-      <button id="tab-all" class="active" type="button">All</button>
+    <div class="mrow">
+      <span class="mlabel">Services</span>
+      <div class="toggle">
+        <button id="tab-mine" type="button">Mine</button>
+        <button id="tab-all" class="active" type="button">All</button>
+      </div>
     </div>
+    <label class="mrow switch">
+      <span class="mlabel">Hide Indian titles</span>
+      <input type="checkbox" id="hide-indian" checked>
+    </label>
   </div>
 </header>
 <main>{''.join(cards)}
   <p id="empty" class="empty">Nothing matches these filters.</p>
 </main>
-<div class="prefs">
-  <label class="switch">
-    <input type="checkbox" id="hide-indian" checked>
-    <span>Hide Indian titles</span>
-  </label>
-</div>
 <footer>Refreshed <span id="refreshed" data-ts="{generated_iso}">{generated}</span><br>Sources: TMDB (releases) · IMDb daily dataset (ratings)</footer>
 <script>
 (function() {{
@@ -608,7 +646,8 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
       tabMine = el('tab-mine'), tabAll = el('tab-all'),
       tabThis = el('tab-this'), tabLast = el('tab-last'),
       chk = el('hide-indian'), countEl = el('count'),
-      datesEl = el('dates'), emptyEl = el('empty');
+      datesEl = el('dates'), emptyEl = el('empty'),
+      scopeEl = el('scope'), menuEl = el('menu'), menuBtn = el('menu-btn');
 
   // Single source of truth: CSS does the hiding, this recomputes the visible
   // count with the same three predicates so the header can never disagree.
@@ -635,6 +674,8 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
     }}
     countEl.textContent = n;
     datesEl.textContent = DATES[wk] || '';
+    // The toggles are behind the menu now, so surface the non-default scope here.
+    scopeEl.textContent = showAll ? '' : ' · My Services';
     emptyEl.style.display = n ? 'none' : 'block';
   }}
 
@@ -644,6 +685,29 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
   tabLast.addEventListener('click', function() {{ lastWeek = true; save('twr.last', true); apply(); }});
   chk.addEventListener('change', function() {{ noIndian = chk.checked; save('twr.noin', noIndian); apply(); }});
   apply();
+
+  // Filter menu. Deliberately NOT persisted — it always opens closed.
+  function setMenu(open) {{
+    menuEl.hidden = !open;
+    menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }}
+  menuBtn.addEventListener('click', function() {{ setMenu(menuEl.hidden); }});
+  document.addEventListener('keydown', function(e) {{
+    if (e.key === 'Escape' || e.keyCode === 27) setMenu(false);
+  }});
+  document.addEventListener('click', function(e) {{
+    // Click-away close. The button's own handler already ran (it bubbles first),
+    // so exempt it here or every open would immediately close itself.
+    if (menuEl.hidden || menuEl.contains(e.target) || menuBtn.contains(e.target)) return;
+    setMenu(false);
+  }});
+
+  // "+N" reveals that card's remaining providers. Delegated, so it costs one
+  // listener rather than one per card.
+  document.addEventListener('click', function(e) {{
+    var t = e.target, more = t && t.closest ? t.closest('.pill.more') : null;
+    if (more && more.parentNode) more.parentNode.classList.add('expanded');
+  }});
 
   // Reformat the refresh time into the viewer's local timezone (falls back to
   // the embedded UTC text if JS is off or the date can't be parsed).
@@ -665,7 +729,9 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
 
 
 def resolved_cache_path(start: str, end: str, args) -> str:
-    flags = f"{args.max_age_days}-{int(args.movies_only)}-{int(args.tv_only)}"
+    # v2: all_providers went from [str] to [{name, logo, mine}]. Bumping the key
+    # retires pre-change caches instead of feeding the page the wrong shape.
+    flags = f"v2-{args.max_age_days}-{int(args.movies_only)}-{int(args.tv_only)}"
     return os.path.join(CACHE_DIR, f"resolved_{start}_{end}_{flags}.json")
 
 
@@ -721,9 +787,9 @@ def resolve_candidates(start: str, end: str, args) -> list[dict]:
         iid = imdb_id_for(it["kind"], it["tmdb_id"])
         it["imdb_id"] = iid
         it["rating"], it["votes"] = imdb_ratings.get(iid, (None, 0)) if iid else (None, 0)
-        mine, all_names = watch_info(it["kind"], it["tmdb_id"])
-        it["platforms"] = mine                                       # our services (My Services view)
-        it["all_providers"] = all_names or [p["name"] for p in mine]  # any service (All view)
+        mine, providers = watch_info(it["kind"], it["tmdb_id"])
+        it["platforms"] = mine            # our services only — terminal list + Pushcut
+        it["all_providers"] = providers   # every service, ours flagged — the card's pill row
         it["on_my_services"] = bool(mine)
         it["platform"] = "/".join(p["name"] for p in mine)           # string for terminal/push
         gmap = gm_movie if it["kind"] == "Movie" else gm_tv
