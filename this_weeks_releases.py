@@ -604,8 +604,8 @@ def generate_html(weeks: list[dict], generated: str, generated_iso: str) -> str:
     <div class="mrow">
       <span class="mlabel">Week</span>
       <div class="toggle">
-        <button id="tab-this" class="active" type="button">This</button>
         <button id="tab-last" type="button">Last</button>
+        <button id="tab-this" class="active" type="button">This</button>
       </div>
     </div>
     <div class="mrow">

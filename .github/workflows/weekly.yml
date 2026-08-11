@@ -31,6 +31,12 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Don't leave GITHUB_TOKEN's Authorization header behind in .git/config.
+          # git prefers that header over credentials embedded in a remote URL, so
+          # the Keepalive step's push went out as github-actions[bot] and 403'd
+          # (this job's token is contents:read). Nothing else here needs git auth.
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -94,14 +100,13 @@ jobs:
             exit 0
           fi
           git commit -m "chore: daily refresh stamp (keeps the Actions schedule alive)"
-          # actions/checkout stores an Authorization header for GITHUB_TOKEN in the
-          # local git config, and that header BEATS credentials embedded in the
-          # remote URL. Leave it in place and the push goes out as
-          # github-actions[bot] and 403s — which is exactly how this failed the
-          # first time it ran for real (run 18:33 UTC on 2026-08-11).
+          # Belt and braces for checkout's persist-credentials:false — strip any
+          # auth header that still made it into the config, then log the key NAMES
+          # (never values) so the next 403, if there is one, is one glance to read.
           for k in $(git config --local --name-only --get-regexp '^http\..*\.extraheader$' || true); do
             git config --local --unset-all "$k" || true
           done
+          echo "local git config keys: $(git config --local --name-only --list | tr '\n' ' ')"
           git remote set-url --push origin "https://x-access-token:${KEEPALIVE_PAT}@github.com/${GITHUB_REPOSITORY}.git"
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
