@@ -1,0 +1,15 @@
+# Copied into _cf/ by the workflow. Cloudflare parses this file rather than
+# serving it, and these rules "override what Cloudflare ordinarily sends".
+#
+# This is the whole reason for deploying to Cloudflare at all. GitHub Pages
+# hardcodes Cache-Control: max-age=600 with no way to override it, so a browser
+# that loaded the page within the last 10 minutes serves its cached copy
+# WITHOUT asking the server — which is exactly the manual-dispatch case, where
+# you rebuild precisely because you want fresh data.
+#
+# no-cache does not mean "don't cache". The browser keeps the copy but must
+# revalidate every time, so an unchanged page costs a ~200-byte 304 and a
+# changed one arrives immediately. Once this is the only deploy target, the
+# version.txt poll in this_weeks_releases.py becomes redundant.
+/tv-releases*
+  Cache-Control: no-cache

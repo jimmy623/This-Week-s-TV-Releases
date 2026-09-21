@@ -29,7 +29,21 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    # Job-level so the steps below can test them in `if:` (step-level env is not
+    # available to a step's own `if`). HAS_CF lets the whole Cloudflare path stay
+    # dormant until the secrets exist, so merging this cannot break the daily run.
+    env:
+      HAS_CF: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+      CF_HOST: ${{ secrets.CF_HOST }}
     steps:
+      # Register the hostname as a masked value before any step can print it.
+      # Secrets are auto-masked, but only as exact strings — CF_HOST is the bare
+      # host precisely so it also gets masked when it appears *inside* a longer
+      # URL emitted by wrangler or by this_weeks_releases.py.
+      - name: Mask private hostname
+        if: ${{ env.CF_HOST != '' }}
+        run: echo "::add-mask::$CF_HOST"
+
       - uses: actions/checkout@v6
         with:
           # Don't leave GITHUB_TOKEN's Authorization header behind in .git/config.
@@ -49,6 +63,19 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: python3 this_weeks_releases.py --cache --html-out _site/index.html
 
+      # Cloudflare serves the page at <host>/tv-releases, so the file has to sit
+      # at that path inside the assets directory. Kept in its own _cf/ tree
+      # rather than reusing _site/ so the Pages copy is not uploaded twice and
+      # cannot be reached at Cloudflare's root. version.txt comes along because
+      # the page polls for it (this_weeks_releases.py writes it beside the HTML).
+      - name: Stage Cloudflare assets
+        if: ${{ env.HAS_CF == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p _cf/tv-releases
+          cp _site/index.html _site/version.txt _cf/tv-releases/
+          cp cloudflare/_headers _cf/_headers
+
       - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
@@ -57,6 +84,16 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v5
 
+      # Second deploy target, running in parallel with Pages until this one is
+      # trusted. No route is passed: it is attached in the Cloudflare dashboard
+      # so the hostname never appears in this public repo. See wrangler.toml.
+      - name: Deploy to Cloudflare
+        if: ${{ env.HAS_CF == 'true' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
       # Page is now live — send the Pushcut notification linking to it.
       # Scheduled runs notify only on Fridays; manual runs always.
       # --cache reuses the data from the Generate step (no extra API calls).
@@ -64,7 +101,10 @@ jobs:
         env:
           TMDB_API_KEY: unused-uses-cache
           PUSHCUT_WEBHOOK: ${{ secrets.PUSHCUT_WEBHOOK }}
-          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          # Point the notification at the Cloudflare URL once PAGE_URL is set as
+          # a secret; until then fall back to the Pages URL so nothing changes.
+          # Flipping this one secret is how you switch over, with no code change.
+          PAGE_URL: ${{ secrets.PAGE_URL != '' && secrets.PAGE_URL || steps.deployment.outputs.page_url }}
         run: python3 this_weeks_releases.py --cache --html-out '' --notify ${{ github.event_name == 'workflow_dispatch' && 'always' || 'auto' }}
 
       # Push a timestamp back to main so the repo keeps registering activity.

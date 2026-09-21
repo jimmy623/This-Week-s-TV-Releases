@@ -1,0 +1,18 @@
+# Cloudflare Workers static-assets deploy. Runs alongside the GitHub Pages
+# deploy in .github/workflows/weekly.yml — neither replaces the other yet.
+#
+# Deliberately NO `route`/`routes` key. Wrangler treats routes as declarative
+# ("if you change your routes in the dashboard, Wrangler will override them in
+# the next deploy"), so listing the hostname here would both leak it in this
+# public repo and fight the dashboard. Omitting the keys is Cloudflare's
+# documented way to manage routes from the dashboard only.
+#
+# workers_dev = false for the same reason: it suppresses the
+# <worker>.<account-subdomain>.workers.dev URL, which would otherwise be echoed
+# on every deploy and reveal the account subdomain in public Actions logs.
+name = "tv-releases"
+compatibility_date = "2026-09-21"
+workers_dev = false
+
+[assets]
+directory = "_cf"
